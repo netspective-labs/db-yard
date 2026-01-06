@@ -1,0 +1,45 @@
+{
+  "lock": false,
+  "tasks": {
+    "init": "git config core.hooksPath .githooks",
+    "sync-import-map": "deno eval --ext ts 'import JSON5 from \"npm:json5@^2\"; const raw = await Deno.readTextFile(\"deno.jsonc\"); const cfg = JSON5.parse(raw); const imports = cfg.imports ?? {}; await Deno.writeTextFile(\"import_map.json\", JSON.stringify({ imports }, null, 2)); console.log(\"import_map.json synced\");' && deno fmt import_map.json",
+    "git-hook-pre-commit": "deno fmt --check --ignore=\"support\" --ignore=\"**/fixture\" && deno lint  --ignore=\"support\" && deno test --parallel --allow-all --v8-flags=\"--max-old-space-size=4096\"",
+    "git-hook-pre-push": "deno test --parallel --allow-all --v8-flags=\"--max-old-space-size=4096\"",
+    "ts-check": "deno check --no-lock $(find . -name '*.ts' -not -path \"./support/*\")",
+    "prepare-publish": "git semtag final"
+  },
+  "lint": {
+    "rules": {
+      "exclude": [
+        // TODO: need to fix all the imports manually and then remove this
+        "no-import-prefix"
+      ]
+    }
+  },
+  // TODO: ensure we use version specifiers in each import
+  "imports": {
+    // Deno standard library
+    "@std/assert": "jsr:@std/assert@^1",
+    "@std/assert/equals": "jsr:@std/assert@^1/equals",
+    "@std/async": "jsr:@std/async@^1",
+    "@std/fs": "jsr:@std/fs@^1",
+    "@std/path": "jsr:@std/path@^1",
+    "@std/yaml": "jsr:@std/yaml@^1",
+    "@std/fmt/colors": "jsr:@std/fmt@1/colors",
+    "@std/media-types": "jsr:@std/media-types@^1",
+
+    // typical
+    "@zod": "jsr:@zod/zod@4",
+    "@zod/zod": "jsr:@zod/zod@4",
+    "json5": "npm:json5@^2",
+    "@david/dax": "jsr:@david/dax@0.44.0",
+    "@gabriel/ts-pattern": "jsr:@gabriel/ts-pattern@^5",
+
+    // cliffy
+    "@cliffy/command": "jsr:@cliffy/command@1.0.0-rc.8",
+    "@cliffy/command/completions": "jsr:@cliffy/command@1.0.0-rc.8/completions",
+    "@cliffy/command/help": "jsr:@cliffy/command@1.0.0-rc.8/help",
+    "@cliffy/completions": "jsr:@cliffy/command@1.0.0-rc.8/completions",
+    "@cliffy/help": "jsr:@cliffy/command@1.0.0-rc.8/help"
+  }
+}
