@@ -1,4 +1,4 @@
-![db-yard Logo](db-yard-logo.png)
+![db-yard Logo](project-hero.png)
 
 `db-yard` is a file-driven process yard that watches directories for SQLite
 database files and automatically turns them into running local services. When a
