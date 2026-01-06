@@ -168,13 +168,13 @@ Each run still creates a timestamped session directory inside this path.
 Starts a lightweight HTTP admin endpoint for introspection.
 
 ```bash
-yard.ts --admin-port 9090
+yard.ts --web-ui-port 9090
 ```
 
 Optional host override:
 
 ```bash
-yard.ts --admin-port 9090 --admin-host 0.0.0.0
+yard.ts --web-ui-port 9090 --web-ui-host 0.0.0.0
 ```
 
 ## Process Management
@@ -205,3 +205,124 @@ This:
 - sends SIGTERM, then SIGKILL if needed
 
 Use with care.
+
+## Web UI and Reverse Proxy
+
+`db-yard` includes an optional built-in web UI that provides lightweight
+inspection, file access, unsafe debugging tools, and request routing to spawned
+services. It is intentionally minimal and local-first.
+
+You enable it by supplying an admin port:
+
+```
+yard.ts --web-ui-port 9090
+```
+
+By default it binds to `127.0.0.1`. You can override this with `--web-ui-host`,
+but exposing it beyond localhost is strongly discouraged.
+
+The web UI provides four distinct behaviors:
+
+1. Hidden admin endpoints (`/.admin`)
+
+These endpoints are intentionally prefixed with `/.admin` to avoid accidental
+discovery.
+
+- `GET /.admin` Returns a JSON snapshot of all currently running instances,
+  including their IDs, ports, database paths, and metadata.
+
+- `GET /.admin/index.html` Displays a simple, fixed-width, directory-style HTML
+  page showing:
+
+  - all running database instances (with links you can click to proxy traffic)
+  - all JSON state files and stdout/stderr logs in the current session directory
+
+  The file listing behaves like a classic directory index. Clicking a file
+  streams the raw JSON or log directly from disk.
+
+- `GET /.admin/files/<name>` Streams an individual JSON or log file from the
+  session directory. This is read-only and limited to files created by
+  `db-yard`.
+
+2. Unsafe SQL endpoint (`/SQL/unsafe`)
+
+- `POST /SQL/unsafe/<id>.json` Executes ad-hoc SQL against the SQLite database
+  for a running instance.
+
+  Request body:
+
+  ```
+  { "sql": "select * from sqlite_master" }
+  ```
+
+  This endpoint is explicitly unsafe. It bypasses application logic and executes
+  SQL directly via the SQLite CLI. It is intended only for local inspection and
+  debugging.
+
+3. Reverse proxy for spawned services
+
+All other paths are treated as reverse-proxy traffic to spawned services:
+
+- `/<id>/...` Proxies the request to the instance with that ID and strips the
+  `/<id>` prefix.
+
+- `/...` (no ID prefix) If exactly one instance is running, traffic is proxied
+  to it automatically.
+
+If multiple instances are running and no ID is provided, the request returns a
+helpful error telling you to use `/<id>/...`.
+
+This makes it easy to run many local SQLite-backed services behind a single port
+without configuring a separate reverse proxy.
+
+4. Security notes
+
+The web UI is intentionally powerful and intentionally unsafe in places.
+
+- Do not bind it to `0.0.0.0` unless you fully trust your network.
+- `/.admin` and `/SQL/unsafe` should be considered local-only debugging tools.
+- Treat the web UI as a development and inspection surface, not a hardened admin
+  plane.
+
+### Using `--kill-all-on-exit` During Development
+
+During active development of `yard.ts` itself, it is easy to leave orphaned
+processes running if the orchestrator crashes, is restarted frequently, or is
+killed abruptly.
+
+To make development safer, `db-yard` provides:
+
+```
+--kill-all-on-exit
+```
+
+When this flag is enabled:
+
+- On process exit (Ctrl+C, SIGTERM, or normal shutdown)
+- `db-yard` scans all session directories it owns
+- Collects all PIDs recorded in `spawned-pids.txt`
+- Gracefully terminates those processes using the same logic as the
+  `spawned --kill` command
+
+Example:
+
+```bash
+yard.ts --watch './cargo.d/**/*.db' --kill-all-on-exit
+```
+
+This is especially useful when:
+
+- Iterating on `yard.ts` internals
+- Repeatedly restarting the orchestrator
+- Debugging spawn logic or driver behavior
+- Running automated tests or scripts that invoke `db-yard`
+
+Important notes:
+
+- This flag is intended for development and local testing.
+- In normal usage, `db-yard` is designed so spawned processes survive
+  orchestrator restarts.
+- Enabling `--kill-all-on-exit` changes that contract.
+
+Do not use `--kill-all-on-exit` in production or shared environments unless you
+explicitly want all spawned services to terminate whenever `db-yard` exits.

@@ -4,7 +4,7 @@ import { Command } from "@cliffy/command";
 import { CompletionsCommand } from "@cliffy/completions";
 import { HelpCommand } from "@cliffy/help";
 
-import { startAdminServer } from "../lib/admin.ts";
+import { startWebUiServer } from "../lib/web-ui.ts";
 import {
   ensureDir,
   isPidAlive,
@@ -50,14 +50,80 @@ type CliOptions = {
 
   adoptForeignState: boolean;
 
-  adminPort?: number;
-  adminHost: string;
+  webUiPort?: number;
+  webUiHost: string;
 
   verbose: boolean;
+  killAllOnExit: boolean;
 };
 
 const defaultWatch = `./cargo.d/**/*.db`;
 const defaultSpawned = `./spawned.d`;
+
+async function listSessionDirs(spawnedStatePath: string): Promise<string[]> {
+  const out: string[] = [];
+  try {
+    for await (const e of Deno.readDir(spawnedStatePath)) {
+      if (!e.isDirectory) continue;
+      out.push(`${spawnedStatePath}/${e.name}`);
+    }
+  } catch {
+    // ignore
+  }
+  out.sort();
+  return out;
+}
+
+async function isOwnedSessionDir(sessionDir: string): Promise<boolean> {
+  // “owned by db-yard” heuristic: presence of the owner token file
+  const p = `${sessionDir}/.db-yard.owner-token`;
+  try {
+    const st = await Deno.stat(p);
+    return st.isFile;
+  } catch {
+    return false;
+  }
+}
+
+async function killAllOwnedSessions(args: {
+  spawnedStatePath: string;
+  verbose: boolean;
+}) {
+  const sessionDirs = await listSessionDirs(args.spawnedStatePath);
+  if (!sessionDirs.length) return;
+
+  const pidToSources = new Map<number, string[]>();
+
+  for (const sessionDir of sessionDirs) {
+    if (!(await isOwnedSessionDir(sessionDir))) continue;
+
+    const pidFile = `${sessionDir}/spawned-pids.txt`;
+    const pids = await readPidsFromFile(pidFile);
+    for (const pid of pids) {
+      const arr = pidToSources.get(pid) ?? [];
+      arr.push(pidFile);
+      pidToSources.set(pid, arr);
+    }
+  }
+
+  const uniquePids = [...pidToSources.keys()].sort((a, b) => a - b);
+  if (!uniquePids.length) return;
+
+  if (args.verbose) {
+    console.log(
+      `[exit] kill-all-on-exit: killing ${uniquePids.length} PID(s) from owned sessions under ${args.spawnedStatePath}`,
+    );
+  }
+
+  for (const pid of uniquePids) {
+    if (pid === Deno.pid) continue;
+
+    const alive = isPidAlive(pid);
+    if (!alive) continue;
+
+    await stopByPid(pid);
+  }
+}
 
 if (import.meta.main) {
   await new Command()
@@ -132,13 +198,18 @@ if (import.meta.main) {
       "Adopt existing state owned by another yard token (unsafe)",
       { default: false },
     )
-    .option("--admin-port <port:number>", "Optional admin HTTP server port", {
+    .option("--web-ui-port <port:number>", "Optional admin HTTP server port", {
       required: false,
     })
-    .option("--admin-host <host:string>", "Admin host (default: 127.0.0.1)", {
+    .option("--web-ui-host <host:string>", "Admin host (default: 127.0.0.1)", {
       default: "127.0.0.1",
     })
     .option("--verbose", "Verbose pretty logging (color)", { default: false })
+    .option(
+      "--kill-all-on-exit",
+      "On exit, kill all spawned PIDs across all sessions that appear to be owned by db-yard",
+      { default: false },
+    )
     .action(async (options: CliOptions) => {
       const watchGlobs =
         (options.watch?.length ? options.watch : [defaultWatch])
@@ -173,14 +244,15 @@ if (import.meta.main) {
         verbose: !!options.verbose,
       });
 
-      const adminPort = options.adminPort;
+      // bin/yard.ts (where you currently start the admin server, swap to web-ui server)
+      const webUiPort = options.webUiPort;
       if (
-        typeof adminPort === "number" && Number.isFinite(adminPort) &&
-        adminPort > 0
+        typeof webUiPort === "number" && Number.isFinite(webUiPort) &&
+        webUiPort > 0
       ) {
-        startAdminServer({
-          adminHost: parseListenHost(options.adminHost || "127.0.0.1"),
-          adminPort: Math.floor(adminPort),
+        startWebUiServer({
+          webHost: parseListenHost(options.webUiHost || "127.0.0.1"),
+          webPort: Math.floor(webUiPort),
           spawnedDir: sessionDir,
           sqliteExec: options.spawnedCtxExec,
           getRunning: () => [...orch.runningByDb.values()],
@@ -190,6 +262,47 @@ if (import.meta.main) {
       console.log(
         `db-yard session started\n  state: ${sessionDir}\n  json:  ${sessionDir}/*.json\n  logs: ${sessionDir}/*.stdout.log, *.stderr.log`,
       );
+
+      // bin/yard.ts (inside .action(...) after orch/start + optional web-ui start, before the final console.log)
+
+      const spawnedRootForExitKill = spawnedBase; // root containing session dirs
+
+      let exitKillRan = false;
+      const runExitKillOnce = async () => {
+        if (exitKillRan) return;
+        exitKillRan = true;
+
+        try {
+          orch.close();
+        } catch {
+          // ignore
+        }
+
+        if (options.killAllOnExit) {
+          await killAllOwnedSessions({
+            spawnedStatePath: spawnedRootForExitKill,
+            verbose: !!options.verbose,
+          });
+        }
+      };
+
+      // handle Ctrl+C / SIGTERM
+      try {
+        Deno.addSignalListener("SIGINT", () => {
+          runExitKillOnce().finally(() => Deno.exit(130));
+        });
+        Deno.addSignalListener("SIGTERM", () => {
+          runExitKillOnce().finally(() => Deno.exit(143));
+        });
+      } catch {
+        // signals may be unavailable on some platforms
+      }
+
+      // also run on normal unload (best-effort)
+      globalThis.addEventListener("unload", () => {
+        // no await allowed here; best-effort fire-and-forget
+        void runExitKillOnce();
+      });
     })
     .command("spawned", "Inspect (and optionally kill) spawned processes")
     .example("List all managed processes across sessions", "yard.ts spawned")
