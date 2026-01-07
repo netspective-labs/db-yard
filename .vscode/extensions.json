@@ -1,5 +1,6 @@
 {
   "recommendations": [
-    "denoland.vscode-deno"
+    "denoland.vscode-deno",
+    "yy0931.vscode-sqlite3-editor"
   ]
 }

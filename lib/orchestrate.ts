@@ -43,6 +43,49 @@ import {
   matchesAny,
 } from "./watch.ts";
 
+function stripDbSuffix(name: string): string {
+  const s = name.trim();
+  if (!s) return "db";
+  const lo = s.toLowerCase();
+  if (lo.endsWith(".sqlite.db")) return s.slice(0, -".sqlite.db".length);
+  if (lo.endsWith(".db")) return s.slice(0, -".db".length);
+  return s;
+}
+
+function normalizePrefix(p: string): string {
+  const s = String(p ?? "").trim();
+  if (!s) return "/";
+  const withSlash = s.startsWith("/") ? s : `/${s}`;
+  const withTrail = withSlash.endsWith("/") ? withSlash : `${withSlash}/`;
+  return withTrail.replaceAll(/\/+/g, "/");
+}
+
+function computeProxyEndpointPrefix(args: {
+  dbRelPath?: string;
+  dbBasename: string;
+  dbYardConfig?: Record<string, unknown>;
+}): string {
+  const cfg = args.dbYardConfig ?? {};
+  const override = cfg["proxy-conf.location-prefix"];
+  if (typeof override === "string" && override.trim()) {
+    return normalizePrefix(override);
+  }
+
+  const rel = (typeof args.dbRelPath === "string" && args.dbRelPath.trim())
+    ? args.dbRelPath.trim()
+    : args.dbBasename;
+
+  const p = normalizeSlash(rel).replace(/^\.\/+/, "").replace(/^\/+/, "");
+  const parts = p.split("/").filter((x) => x.length);
+
+  const last = parts.pop() ?? "db";
+  const dir = parts.join("/");
+  const base = stripDbSuffix(last) || "db";
+
+  const prefix = dir ? `/${dir}/${base}/` : `/${base}/`;
+  return prefix.replaceAll(/\/+/g, "/");
+}
+
 export type Orchestrator = {
   runningByDb: Map<string, Running>;
   close(): void;
@@ -378,6 +421,11 @@ export async function startOrchestrator(
       sqls: cfg.spawnedCtxSqls,
     });
 
+    rec.proxyEndpointPrefix = computeProxyEndpointPrefix({
+      dbRelPath: rec.dbRelPath,
+      dbBasename: rec.dbBasename,
+    });
+
     const jsonPath = spawnedJsonPath(cfg.spawnedDir, rec.dbBasename, rec.id);
     await writeSpawnedRecord(jsonPath, rec);
 
@@ -471,6 +519,12 @@ export async function startOrchestrator(
         portOverride > 0
         ? Math.floor(portOverride)
         : pickFreePort(listenHost);
+    const dbBasename = safeBaseName(dbAbsPath);
+
+    const proxyEndpointPrefix = computeProxyEndpointPrefix({
+      dbRelPath: rel,
+      dbBasename,
+    });
 
     const plan = driver.buildPlan({
       dbPath: dbAbsPath,
@@ -480,9 +534,9 @@ export async function startOrchestrator(
       surveilrBin: cfg.surveilrBin,
       sqlpageBin: cfg.sqlpageBin,
       dbYardConfig,
+      proxyEndpointPrefix,
     });
 
-    const dbBasename = safeBaseName(dbAbsPath);
     const stdoutLogPath = spawnedStdoutPath(cfg.spawnedDir, dbBasename, id);
     const stderrLogPath = spawnedStderrPath(cfg.spawnedDir, dbBasename, id);
 
@@ -530,6 +584,10 @@ export async function startOrchestrator(
       dbPath: dbAbsPath,
       dbRelPath: rel,
       dbBasename,
+      proxyEndpointPrefix: computeProxyEndpointPrefix({
+        dbRelPath: rel,
+        dbBasename,
+      }),
       listenHost,
       port,
       spawnedAtMs: nowMs(),

@@ -35,6 +35,10 @@ export type SpawnedProcess = {
   dbRelPath?: string;
   dbBasename: string;
 
+  // Proxy prefix computed from dbRelPath (or dbBasename fallback)
+  // Example: dbRelPath "abc/def/my.sqlite.db" => "/abc/def/my/"
+  proxyEndpointPrefix: string;
+
   listenHost: string;
   port: number;
 
@@ -96,6 +100,7 @@ export type SpawnDriver = {
     surveilrBin: string;
     sqlpageBin: string;
     dbYardConfig: Record<string, unknown>;
+    proxyEndpointPrefix: string;
   }): SpawnPlan;
 };
 
