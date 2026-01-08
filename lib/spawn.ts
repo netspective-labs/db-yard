@@ -1,9 +1,7 @@
 // lib/spawn.ts
-import { ensureDir } from "@std/fs";
-import { dirname, relative, resolve } from "@std/path";
+import { resolve } from "@std/path";
 
 import type { Path } from "./discover.ts";
-import { tabular, type TabularDataSupplier } from "./tabular.ts";
 import {
   exposable,
   type ExposableService,
@@ -12,12 +10,15 @@ import {
   type SpawnHost,
   type SpawnLogTarget,
 } from "./exposable.ts";
+import { ensureParentDir } from "./fs.ts";
+import { joinUrl, safeRelFromRoot } from "./path.ts";
+import { tabular, TabularDataSupplier } from "./tabular.ts";
 
-export type SpawnStateNature = "context" | "stdout" | "stderr";
+export type SpawnLedgerNature = "context" | "stdout" | "stderr";
 
-export type SpawnStatePath<Entry> = (
+export type SpawnLedgerPath<Entry> = (
   entry: Entry,
-  nature: SpawnStateNature,
+  nature: SpawnLedgerNature,
 ) => string | undefined;
 
 export type SpawnSummary = Readonly<{
@@ -333,7 +334,7 @@ export async function killPID(pid: number): Promise<void> {
 export async function* spawn(
   srcPaths: Iterable<Path>,
   expose: ExposeFn,
-  spawnStatePath: SpawnStatePath<ExposableService>,
+  spawnedLedgerPath: SpawnLedgerPath<ExposableService>,
   opts: SpawnOptions,
 ): AsyncGenerator<SpawnedContext, SpawnSummary> {
   const host: SpawnHost = opts.host ?? { identity: "spawn", pid: Deno.pid };
@@ -409,7 +410,6 @@ export async function* spawn(
       continue;
     }
 
-    // decision is now narrowed to the object branch
     await emit({ type: "expose_decision", serviceId: id, shouldSpawn: true });
 
     const proxyEndpointPrefix = decision.proxyEndpointPrefix;
@@ -425,12 +425,12 @@ export async function* spawn(
       baseUrl,
     });
 
-    const ctxPath = spawnStatePath(service, "context");
-    const stdoutPath = spawnStatePath(service, "stdout") ??
+    const ctxPath = spawnedLedgerPath(service, "context");
+    const stdoutPath = spawnedLedgerPath(service, "stdout") ??
       (typeof opts.defaultStdoutLogPath === "string"
         ? opts.defaultStdoutLogPath
         : undefined);
-    const stderrPath = spawnStatePath(service, "stderr") ??
+    const stderrPath = spawnedLedgerPath(service, "stderr") ??
       (typeof opts.defaultStderrLogPath === "string"
         ? opts.defaultStderrLogPath
         : undefined);
@@ -451,6 +451,11 @@ export async function* spawn(
 
     await emit({ type: "spawning", serviceId: id, proxyEndpointPrefix });
 
+    const upstreamUrl = joinUrl(
+      baseUrl,
+      proxyEndpointPrefix === "" ? "/" : proxyEndpointPrefix,
+    );
+
     const probeUrl = buildProbeUrl({
       baseUrl,
       proxyEndpointPrefix,
@@ -461,6 +466,24 @@ export async function* spawn(
     try {
       let child: SpawnedProcess;
       const contextPathAbs = ctxPath ? resolve(ctxPath) : undefined;
+
+      const tags = contextPathAbs
+        ? {
+          sessionId: session.sessionId,
+          serviceId: id,
+          contextPath: contextPathAbs,
+
+          kind: service.kind,
+          label: service.label,
+          proxyEndpointPrefix,
+          upstreamUrl,
+
+          listenHost,
+          port,
+          baseUrl,
+          probeUrl,
+        }
+        : undefined;
 
       if (service.kind === "sqlpage") {
         child = await service.spawn({
@@ -473,13 +496,7 @@ export async function* spawn(
             sqlpageEnv,
             stdoutLogPath: stdoutPath,
             stderrLogPath: stderrPath,
-            processTags: contextPathAbs
-              ? {
-                sessionId: session.sessionId,
-                serviceId: id,
-                contextPath: contextPathAbs,
-              }
-              : undefined,
+            processTags: tags,
           },
           exposableServiceConf,
         });
@@ -493,23 +510,13 @@ export async function* spawn(
             surveilrBin,
             stdoutLogPath: stdoutPath,
             stderrLogPath: stderrPath,
-            processTags: contextPathAbs
-              ? {
-                sessionId: session.sessionId,
-                serviceId: id,
-                contextPath: contextPathAbs,
-              }
-              : undefined,
+            processTags: tags,
           },
           exposableServiceConf,
         });
       }
 
       await emit({ type: "spawned", serviceId: id, pid: child.pid });
-      const upstreamUrl = joinUrl(
-        baseUrl,
-        proxyEndpointPrefix === "" ? "/" : proxyEndpointPrefix,
-      );
 
       const ctx: SpawnedContext = {
         startedAt: new Date().toISOString(),
@@ -627,7 +634,12 @@ export type TaggedProcess = Readonly<{
   serviceId: string;
   contextPath: string;
 
-  // Full env (best-effort; includes the three tags)
+  kind?: string;
+  label?: string;
+  proxyEndpointPrefix?: string;
+  upstreamUrl?: string;
+
+  // Full env (best-effort; includes all tags)
   env: Record<string, string>;
 
   // Best-effort enrichments
@@ -642,18 +654,32 @@ export type TaggedProcess = Readonly<{
     sessionId?: { env: string; ctx?: string };
     serviceId?: { env: string; ctx?: string };
     contextPath?: { env: string; ctx?: string };
+    kind?: { env?: string; ctx?: string };
+    label?: { env?: string; ctx?: string };
+    proxyEndpointPrefix?: { env?: string; ctx?: string };
+    upstreamUrl?: { env?: string; ctx?: string };
   }>;
 }>;
+
+function mismatch(envVal: string | undefined, ctxVal: string | undefined) {
+  if (envVal === undefined && ctxVal === undefined) return undefined;
+  if ((envVal ?? "") === (ctxVal ?? "")) return undefined;
+  return { env: String(envVal ?? ""), ctx: ctxVal };
+}
 
 /**
  * Linux-only: yield all processes "owned" by db-yard using env tags:
  * - DB_YARD_CONTEXT_PATH
  * - DB_YARD_SESSION_ID
  * - DB_YARD_SERVICE_ID
+ * - DB_YARD_KIND
+ * - DB_YARD_LABEL
+ * - DB_YARD_PROXY_ENDPOINT_PREFIX
+ * - DB_YARD_UPSTREAM_URL
  *
  * Notes:
  * - Requires permission to read /proc/<pid>/environ for target processes.
- * - Skips processes we cannot inspect (/proc perms) or that don't include all tags.
+ * - Skips processes we cannot inspect (/proc perms) or that don't include CONTEXT_PATH.
  * - Reads cmdline and context.json best-effort; yields even if those enrichments fail.
  */
 export async function* taggedProcesses(): AsyncGenerator<TaggedProcess> {
@@ -705,23 +731,59 @@ export async function* taggedProcesses(): AsyncGenerator<TaggedProcess> {
     try {
       const ctxContent = await Deno.readTextFile(contextPath);
       context = JSON.parse(ctxContent) as SpawnedContext;
-    } catch (e) {
-      issue = e;
+    } catch (e2) {
+      issue = e2;
       context = undefined;
     }
 
-    // Prefer context.json values when available, fall back to env.
-    let sessionId = "";
-    if (context?.session?.sessionId) sessionId = context.session.sessionId;
-    else if (typeof env["DB_YARD_SESSION_ID"] === "string") {
-      sessionId = env["DB_YARD_SESSION_ID"];
-    }
+    const envSessionId = typeof env["DB_YARD_SESSION_ID"] === "string"
+      ? env["DB_YARD_SESSION_ID"]
+      : undefined;
+    const envServiceId = typeof env["DB_YARD_SERVICE_ID"] === "string"
+      ? env["DB_YARD_SERVICE_ID"]
+      : undefined;
 
-    let serviceId = "";
-    if (context?.service?.id) serviceId = context.service.id;
-    else if (typeof env["DB_YARD_SERVICE_ID"] === "string") {
-      serviceId = env["DB_YARD_SERVICE_ID"];
-    }
+    const envKind = typeof env["DB_YARD_KIND"] === "string"
+      ? env["DB_YARD_KIND"]
+      : undefined;
+    const envLabel = typeof env["DB_YARD_LABEL"] === "string"
+      ? env["DB_YARD_LABEL"]
+      : undefined;
+    const envProxy = typeof env["DB_YARD_PROXY_ENDPOINT_PREFIX"] === "string"
+      ? env["DB_YARD_PROXY_ENDPOINT_PREFIX"]
+      : undefined;
+    const envUpstream = typeof env["DB_YARD_UPSTREAM_URL"] === "string"
+      ? env["DB_YARD_UPSTREAM_URL"]
+      : undefined;
+
+    const ctxSessionId = context?.session?.sessionId;
+    const ctxServiceId = context?.service?.id;
+    const ctxKind = context?.service?.kind;
+    const ctxLabel = context?.service?.label;
+    const ctxProxy = context?.service?.proxyEndpointPrefix;
+    const ctxUpstream = context?.service?.upstreamUrl;
+
+    const tagMismatch = {
+      sessionId: mismatch(envSessionId, ctxSessionId),
+      serviceId: mismatch(envServiceId, ctxServiceId),
+      contextPath: mismatch(envContextPath, contextPath),
+      kind: mismatch(envKind, ctxKind),
+      label: mismatch(envLabel, ctxLabel),
+      proxyEndpointPrefix: mismatch(envProxy, ctxProxy),
+      upstreamUrl: mismatch(envUpstream, ctxUpstream),
+    };
+
+    const hasAnyMismatch = Object.values(tagMismatch).some((v) =>
+      v !== undefined
+    );
+
+    // Prefer context.json values when available, fall back to env.
+    const sessionId = ctxSessionId ?? envSessionId ?? "";
+    const serviceId = ctxServiceId ?? envServiceId ?? "";
+    const kind = ctxKind ?? envKind;
+    const label = ctxLabel ?? envLabel;
+    const proxyEndpointPrefix = ctxProxy ?? envProxy;
+    const upstreamUrl = ctxUpstream ?? envUpstream;
 
     // Validate pid consistency: /proc/<pid> vs context.spawned.pid
     const ctxPidRaw = (context as unknown as { spawned?: { pid?: unknown } })
@@ -748,11 +810,18 @@ export async function* taggedProcesses(): AsyncGenerator<TaggedProcess> {
       pid,
       sessionId,
       serviceId,
-      env,
       contextPath,
+
+      kind,
+      label,
+      proxyEndpointPrefix,
+      upstreamUrl,
+
+      env,
       context,
       cmdline,
       issue,
+      tagMismatch: hasAnyMismatch ? tagMismatch : undefined,
     } satisfies TaggedProcess;
   }
 }
@@ -765,22 +834,6 @@ export async function killSpawnedProcesses() {
 
 /* -------------------------------- helpers -------------------------------- */
 
-async function ensureParentDir(filePath: string): Promise<void> {
-  const dir = dirname(filePath);
-  if (dir && dir !== "." && dir !== "/") await ensureDir(dir);
-}
-
-function safeRelFromRoot(root: string | undefined, filePath: string): string {
-  try {
-    if (!root || root.trim().length === 0) return filePath;
-    const rel = relative(root, filePath);
-    if (rel.startsWith("..") || rel === "") return filePath;
-    return rel;
-  } catch {
-    return filePath;
-  }
-}
-
 function stripTrailingExt(p: string): string {
   const i = p.lastIndexOf(".");
   if (i <= 0) return p;
@@ -791,19 +844,6 @@ function defaultProxyEndpointPrefix(kind: string, relNoExt: string): string {
   const norm = relNoExt.replaceAll("\\", "/").replaceAll(/\/+/g, "/").trim();
   const clean = norm.length === 0 ? kind : norm;
   return `/apps/${kind}/${clean}`.replaceAll(/\/+/g, "/");
-}
-
-function normalizePathForUrl(path: string): string {
-  const p = path.replaceAll("\\", "/").trim();
-  if (!p) return "/";
-  if (!p.startsWith("/")) return `/${p}`;
-  return p;
-}
-
-function joinUrl(baseUrl: string, path: string): string {
-  const b = baseUrl.replace(/\/+$/, "");
-  const p = normalizePathForUrl(path);
-  return `${b}${p}`;
 }
 
 function buildProbeUrl(

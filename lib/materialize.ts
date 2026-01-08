@@ -13,13 +13,15 @@ import {
   type SpawnedContext,
   type SpawnEventListener,
   type SpawnSummary,
+  type TaggedProcess,
+  taggedProcesses,
 } from "./spawn.ts";
 
 export type MaterializeVerbose = false | "essential" | "comprehensive";
 
 export type MaterializeOptions = Readonly<{
   verbose: MaterializeVerbose;
-  spawnStateHome: string;
+  spawnedLedgerHome: string;
 }>;
 
 export type MaterializeResult = Readonly<{
@@ -36,10 +38,10 @@ export async function materialize(
 
   const rootsAbs = resolveRootsAbs(src);
 
-  const spawnStateHome = resolve(opts.spawnStateHome);
-  await ensureDir(spawnStateHome);
+  const spawnedLedgerHome = resolve(opts.spawnedLedgerHome);
+  await ensureDir(spawnedLedgerHome);
 
-  const session = await createSpawnSessionHome(spawnStateHome);
+  const session = await createSpawnSessionHome(spawnedLedgerHome);
 
   const onEvent: SpawnEventListener | undefined = opts.verbose === false
     ? undefined
@@ -47,12 +49,12 @@ export async function materialize(
 
   const spawned: SpawnedContext[] = [];
 
-  const { spawnStatePathForEntry } = await import("./session.ts");
-  const spawnStatePath = (
+  const { spawnedLedgerPathForEntry } = await import("./session.ts");
+  const spawnedLedgerPath = (
     entry: ExposableService,
     nature: "context" | "stdout" | "stderr",
   ): string | undefined =>
-    spawnStatePathForEntry(entry, nature, {
+    spawnedLedgerPathForEntry(entry, nature, {
       sessionHome: session.sessionHome,
       rootsAbs,
     });
@@ -66,7 +68,7 @@ export async function materialize(
     return { proxyEndpointPrefix, exposableServiceConf: {} } as const;
   };
 
-  const gen = spawn(src, expose, spawnStatePath, {
+  const gen = spawn(src, expose, spawnedLedgerPath, {
     onEvent,
     probe: { enabled: false },
   });
@@ -84,7 +86,7 @@ export async function materialize(
   }
 }
 
-export type SpawnedStateEncounter = Readonly<{
+export type SpawnedLedgerEncounter = Readonly<{
   filePath: string;
   context: SpawnedContext;
   pid: number;
@@ -92,9 +94,11 @@ export type SpawnedStateEncounter = Readonly<{
   procCmdline?: string;
 }>;
 
-export async function* spawnedStates(spawnStateHomeOrSessionHome: string) {
+export async function* spawnedLedgerStates(
+  spawnedLedgerHomeOrSessionHome: string,
+) {
   const gen = encounters(
-    [{ path: spawnStateHomeOrSessionHome, globs: ["**/*.json"] }],
+    [{ path: spawnedLedgerHomeOrSessionHome, globs: ["**/*.json"] }],
     fileSystemSource({}, (e) => Deno.readTextFile(e.path)),
     async ({ entry, content }) => {
       const filePath = entry.path;
@@ -117,13 +121,130 @@ export async function* spawnedStates(spawnStateHomeOrSessionHome: string) {
         pid,
         pidAlive,
         procCmdline,
-      };
+      } satisfies SpawnedLedgerEncounter;
     },
   );
 
   while (true) {
     const next = await gen.next();
     if (next.done) return next.value;
-    if (next.value != null) yield next.value;
+    if (next.value != null) yield next.value as SpawnedLedgerEncounter;
   }
+}
+
+/* -------------------------------- reconcile ------------------------------- */
+
+export type ReconcileItem =
+  | Readonly<{
+    kind: "process_without_ledger";
+    pid: number;
+    serviceId: string;
+    sessionId: string;
+    contextPath: string;
+    cmdline?: string;
+  }>
+  | Readonly<{
+    kind: "ledger_without_process";
+    ledgerContextPath: string;
+    pid: number;
+    serviceId?: string;
+    sessionId?: string;
+  }>
+  | Readonly<{
+    kind: "process_and_ledger_mismatch";
+    pid: number;
+    serviceId: string;
+    sessionId: string;
+    contextPath: string;
+    mismatch: TaggedProcess["tagMismatch"];
+  }>;
+
+export type ReconcileSummary = Readonly<{
+  processWithoutLedger: number;
+  ledgerWithoutProcess: number;
+  mismatched: number;
+}>;
+
+/**
+ * Reconcile operational truth (Linux tagged processes) vs spawned ledger (context.json files).
+ *
+ * Input can be either the ledger home or a specific sessionHome.
+ */
+export async function* reconcile(
+  spawnedLedgerHomeOrSessionHome: string,
+): AsyncGenerator<ReconcileItem, ReconcileSummary> {
+  const base = resolve(spawnedLedgerHomeOrSessionHome);
+
+  // 1) Build ledger index (by pid, by context path)
+  const ledgerByPid = new Map<number, SpawnedLedgerEncounter>();
+  const ledgerByContextPath = new Map<string, SpawnedLedgerEncounter>();
+
+  for await (const le of spawnedLedgerStates(base)) {
+    ledgerByPid.set(le.pid, le);
+    ledgerByContextPath.set(resolve(le.filePath), le);
+  }
+
+  // 2) Walk processes and emit process-side discrepancies
+  let processWithoutLedger = 0;
+  let mismatched = 0;
+
+  const seenLedgerPids = new Set<number>();
+
+  for await (const tp of taggedProcesses()) {
+    const pid = tp.pid;
+
+    // We consider the ledger “present” if the process' contextPath exists in ledger scan OR pid matches.
+    const ledgerByCtx = ledgerByContextPath.get(resolve(tp.contextPath));
+    const ledger = ledgerByCtx ?? ledgerByPid.get(pid);
+
+    if (!ledger) {
+      processWithoutLedger++;
+      yield {
+        kind: "process_without_ledger",
+        pid,
+        serviceId: tp.serviceId,
+        sessionId: tp.sessionId,
+        contextPath: tp.contextPath,
+        cmdline: tp.cmdline,
+      };
+      continue;
+    }
+
+    seenLedgerPids.add(ledger.pid);
+
+    if (tp.tagMismatch) {
+      mismatched++;
+      yield {
+        kind: "process_and_ledger_mismatch",
+        pid,
+        serviceId: tp.serviceId,
+        sessionId: tp.sessionId,
+        contextPath: tp.contextPath,
+        mismatch: tp.tagMismatch,
+      };
+    }
+  }
+
+  // 3) Emit ledger-side discrepancies: contexts whose pid is not alive OR not seen in taggedProcesses
+  let ledgerWithoutProcess = 0;
+
+  for (const [pid, le] of ledgerByPid.entries()) {
+    const alive = isPidAlive(pid);
+    if (alive && seenLedgerPids.has(pid)) continue;
+
+    ledgerWithoutProcess++;
+    yield {
+      kind: "ledger_without_process",
+      ledgerContextPath: resolve(le.filePath),
+      pid,
+      serviceId: le.context?.service?.id,
+      sessionId: le.context?.session?.sessionId,
+    };
+  }
+
+  return {
+    processWithoutLedger,
+    ledgerWithoutProcess,
+    mismatched,
+  };
 }

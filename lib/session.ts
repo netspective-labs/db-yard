@@ -5,7 +5,7 @@ import type { Path } from "./discover.ts";
 import type { ExposableService } from "./exposable.ts";
 import { normalizeSlash } from "./path.ts";
 
-export type SpawnStateNature = "context" | "stdout" | "stderr";
+export type SpawnLedgerNature = "context" | "stdout" | "stderr";
 
 function fmt2(n: number): string {
   return String(n).padStart(2, "0");
@@ -65,24 +65,24 @@ export function relDirFromRoots(
   return normalizeSlash(d).replaceAll(/\/+$/g, "");
 }
 
-export async function ensureSpawnStateHome(
-  spawnStateHome: string,
+export async function ensureSpawnedLedgerHome(
+  spawnedLedgerHome: string,
 ): Promise<string> {
-  const home = resolve(spawnStateHome);
+  const home = resolve(spawnedLedgerHome);
   await ensureDir(home);
   return home;
 }
 
 export type SpawnSessionHome = Readonly<{
-  spawnStateHome: string;
+  spawnedLedgerHome: string;
   sessionHome: string;
   sessionName: string;
 }>;
 
 export async function createSpawnSessionHome(
-  spawnStateHome: string,
+  spawnedLedgerHome: string,
 ): Promise<SpawnSessionHome> {
-  const home = await ensureSpawnStateHome(spawnStateHome);
+  const home = await ensureSpawnedLedgerHome(spawnedLedgerHome);
   const sessionName = sessionStamp();
   const sessionHome = join(home, sessionName);
   await ensureDir(sessionHome);
@@ -90,13 +90,13 @@ export async function createSpawnSessionHome(
   // Pointer file for “current session” (portable, no symlinks).
   await Deno.writeTextFile(join(home, ".current-session"), `${sessionName}\n`);
 
-  return { spawnStateHome: home, sessionHome, sessionName };
+  return { spawnedLedgerHome: home, sessionHome, sessionName };
 }
 
 export async function resolveCurrentSessionHome(
-  spawnStateHome: string,
+  spawnedLedgerHome: string,
 ): Promise<SpawnSessionHome | undefined> {
-  const home = resolve(spawnStateHome);
+  const home = resolve(spawnedLedgerHome);
   const pointer = join(home, ".current-session");
   try {
     const name = (await Deno.readTextFile(pointer)).trim();
@@ -104,16 +104,16 @@ export async function resolveCurrentSessionHome(
     const sessionHome = join(home, name);
     const st = await Deno.stat(sessionHome);
     if (!st.isDirectory) return undefined;
-    return { spawnStateHome: home, sessionHome, sessionName: name };
+    return { spawnedLedgerHome: home, sessionHome, sessionName: name };
   } catch {
     return undefined;
   }
 }
 
 export async function pickLatestSessionHome(
-  spawnStateHome: string,
+  spawnedLedgerHome: string,
 ): Promise<SpawnSessionHome | undefined> {
-  const home = resolve(spawnStateHome);
+  const home = resolve(spawnedLedgerHome);
 
   let best: string | undefined;
   try {
@@ -128,15 +128,15 @@ export async function pickLatestSessionHome(
 
   if (!best) return undefined;
   return {
-    spawnStateHome: home,
+    spawnedLedgerHome: home,
     sessionHome: join(home, best),
     sessionName: best,
   };
 }
 
-export function spawnStatePathForEntry(
+export function spawnedLedgerPathForEntry(
   entry: ExposableService,
-  nature: SpawnStateNature,
+  nature: SpawnLedgerNature,
   args: Readonly<{ sessionHome: string; rootsAbs: readonly string[] }>,
 ): string | undefined {
   const fileAbs = Deno.realPathSync(resolve(entry.supplier.location));

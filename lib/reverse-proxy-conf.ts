@@ -1,8 +1,7 @@
 // lib/reverse-proxy-conf.ts
-import { normalize as normalizePath } from "@std/path";
 import { ensureDir } from "@std/fs";
-
-import { spawnedStates } from "./materialize.ts";
+import { normalize as normalizePath } from "@std/path";
+import { taggedProcesses } from "./spawn.ts";
 
 function safeFileName(s: string) {
   return s.replaceAll(/[^A-Za-z0-9._-]/g, "_");
@@ -59,29 +58,29 @@ export type ProxyConfOverrides = Readonly<{
   }>;
 }>;
 
-type SpawnedState = Awaited<ReturnType<typeof spawnedStates>> extends
+type SpawnedState = Awaited<ReturnType<typeof taggedProcesses>> extends
   AsyncGenerator<infer S> ? S : never;
 
 function stateId(s: SpawnedState): string {
-  return s.context.service.id;
+  return s.serviceId ?? "stateId?";
 }
 
 function stateKind(s: SpawnedState): string {
-  return s.context.service.kind;
+  return s.context?.service.kind ?? "stateKind?";
 }
 
 function stateDbPath(s: SpawnedState): string {
-  return (s.context.supplier as { location?: string }).location ?? "";
+  return (s.context?.supplier as { location?: string }).location ?? "";
 }
 
 function defaultLocationPrefixFromState(s: SpawnedState): string {
-  const p = s.context.service.proxyEndpointPrefix || "/";
+  const p = s.context?.service.proxyEndpointPrefix || "/";
   const norm = p.replaceAll("\\", "/").replaceAll(/\/+/g, "/").trim();
   return ensureTrailingSlash(norm.startsWith("/") ? norm : `/${norm}`);
 }
 
 function upstreamFromState(s: SpawnedState): string {
-  return s.context.listen.baseUrl;
+  return s.context?.listen.baseUrl ?? "";
 }
 
 function nginxHeaderLine(name: string, value: string | number): string {
@@ -264,20 +263,15 @@ ${mwBlock}${extraBlock}`;
 }
 
 export async function generateReverseProxyConfsFromSpawnedStates(args: {
-  spawnStateHome: string;
   nginxConfHome?: string;
   traefikConfHome?: string;
   verbose?: boolean;
-  includeDead?: boolean; // default false
   overrides?: ProxyConfOverrides;
 }) {
-  const spawnStateHome = normalizePath(args.spawnStateHome);
-  const includeDead = args.includeDead ?? false;
   const overrides = args.overrides ?? {};
 
   const states: SpawnedState[] = [];
-  for await (const s of spawnedStates(spawnStateHome)) {
-    if (!includeDead && !s.pidAlive) continue;
+  for await (const s of taggedProcesses()) {
     states.push(s);
   }
 
