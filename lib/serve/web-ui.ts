@@ -7,7 +7,7 @@ import {
   listFilesRecursiveViaEncounters,
 } from "../fs.ts";
 import { type SpawnedStateEncounter, spawnedStates } from "../materialize.ts";
-import { contentTypeByName, isSafeRelativeSubpath, joinUrl } from "../path.ts";
+import { contentTypeByName, isSafeRelativeSubpath } from "../path.ts";
 import {
   createSpawnSessionHome,
   pickLatestSessionHome,
@@ -499,10 +499,7 @@ export async function startWebUiServer(opts: WebUiOptions) {
         listen: r.context.listen,
         pid: r.pid,
         pidAlive: isPidAlive(r.pid),
-        upstreamUrl: joinUrl(
-          r.context.listen.baseUrl,
-          r.context.service.proxyEndpointPrefix || "/",
-        ),
+        upstreamUrl: r.context.service.upstreamUrl,
         filePath: r.filePath,
       })).sort((a, b) =>
         `${a.kind}:${a.id}`.localeCompare(`${b.kind}:${b.id}`)

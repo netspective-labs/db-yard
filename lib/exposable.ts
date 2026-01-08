@@ -160,6 +160,8 @@ export async function spawnPlan(
   };
 }
 
+/* --------------------------------- init ---------------------------------- */
+
 /**
  * Base init shared across all exposable services.
  *
@@ -181,6 +183,16 @@ export type ExposableInit = Readonly<{
    */
   stdoutLogPath?: SpawnLogTarget;
   stderrLogPath?: SpawnLogTarget;
+
+  /**
+   * Linux-native-ish process ownership tags via env vars.
+   * These link the spawned process back to the ledger context JSON.
+   */
+  processTags?: Readonly<{
+    sessionId: string;
+    serviceId: string;
+    contextPath: string;
+  }>;
 }>;
 
 /**
@@ -327,6 +339,17 @@ function buildSqlpageDatabaseUrl(dbAbsPath: string): string {
   return `sqlite://${dbAbsPath}`;
 }
 
+function processTagsEnv(init: ExposableInit): Record<string, string> {
+  const t = init.processTags;
+  if (!t) return {};
+  // Keep names exactly as requested.
+  return {
+    DB_YARD_CONTEXT_PATH: t.contextPath,
+    DB_YARD_SESSION_ID: t.sessionId,
+    DB_YARD_SERVICE_ID: t.serviceId,
+  };
+}
+
 function buildSqlPageSpawnPlan(args: {
   dbPath: string;
   init: SqlPageInit;
@@ -343,6 +366,7 @@ function buildSqlPageSpawnPlan(args: {
     LISTEN_ON: `${init.listenHost}:${init.port}`,
     SQLPAGE_ENVIRONMENT: init.sqlpageEnv,
     SQLPAGE_SITE_PREFIX: init.proxyEndpointPrefix,
+    ...processTagsEnv(init),
   };
 
   const extraEnv = readEnvObject(conf["sqlpage.env"]);
@@ -389,6 +413,7 @@ function buildSurveilrSpawnPlan(args: {
     ],
     env: {
       SQLPAGE_SITE_PREFIX: init.proxyEndpointPrefix,
+      ...processTagsEnv(init),
       ...envBlock,
     },
     tag: `surveilr:${safeServiceId(dbPath)}`,

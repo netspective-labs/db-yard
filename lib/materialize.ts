@@ -4,18 +4,16 @@ import { resolve } from "@std/path";
 import type { Path } from "./discover.ts";
 import { encounters, fileSystemSource } from "./discover.ts";
 import type { ExposableService } from "./exposable.ts";
+import { createSpawnSessionHome, resolveRootsAbs } from "./session.ts";
 import { richTextUISpawnEvents } from "./spawn-event.ts";
 import {
   isPidAlive,
-  killPID,
   readProcCmdline,
   spawn,
   type SpawnedContext,
   type SpawnEventListener,
   type SpawnSummary,
 } from "./spawn.ts";
-import { createSpawnSessionHome, resolveRootsAbs } from "./session.ts";
-import { joinUrl } from "./path.ts";
 
 export type MaterializeVerbose = false | "essential" | "comprehensive";
 
@@ -92,7 +90,6 @@ export type SpawnedStateEncounter = Readonly<{
   pid: number;
   pidAlive: boolean;
   procCmdline?: string;
-  upstreamUrl: string;
 }>;
 
 export async function* spawnedStates(spawnStateHomeOrSessionHome: string) {
@@ -114,20 +111,12 @@ export async function* spawnedStates(spawnStateHomeOrSessionHome: string) {
       const pidAlive = isPidAlive(pid);
       const procCmdline = pidAlive ? await readProcCmdline(pid) : undefined;
 
-      const upstreamUrl = joinUrl(
-        ctx.listen.baseUrl,
-        ctx.service.proxyEndpointPrefix === ""
-          ? "/"
-          : ctx.service.proxyEndpointPrefix,
-      );
-
       return {
         filePath,
         context: ctx,
         pid,
         pidAlive,
         procCmdline,
-        upstreamUrl,
       };
     },
   );
@@ -136,14 +125,5 @@ export async function* spawnedStates(spawnStateHomeOrSessionHome: string) {
     const next = await gen.next();
     if (next.done) return next.value;
     if (next.value != null) yield next.value;
-  }
-}
-
-export async function killSpawnedStates(
-  spawnStateHomeOrSessionHome: string,
-): Promise<void> {
-  for await (const state of spawnedStates(spawnStateHomeOrSessionHome)) {
-    const { pid, pidAlive } = state;
-    if (pidAlive) await killPID(pid);
   }
 }

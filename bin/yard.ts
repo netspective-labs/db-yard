@@ -4,21 +4,19 @@ import { Command, EnumType } from "@cliffy/command";
 import { CompletionsCommand } from "@cliffy/completions";
 import { HelpCommand } from "@cliffy/help";
 import { cyan, dim, green, red, yellow } from "@std/fmt/colors";
-import {
-  killSpawnedStates,
-  materialize,
-  spawnedStates,
-} from "../lib/materialize.ts";
+import { materialize, spawnedStates } from "../lib/materialize.ts";
 import { generateReverseProxyConfsFromSpawnedStates } from "../lib/reverse-proxy-conf.ts";
 import { type WatchEvent, watchYard } from "../lib/serve/watch.ts";
 import { startWebUiServer } from "../lib/serve/web-ui.ts";
 import { richTextUISpawnEvents } from "../lib/spawn-event.ts";
+import { killSpawnedProcesses, taggedProcesses } from "../lib/spawn.ts";
 
 export async function lsSpawnedStates(
   spawnStateHomeOrSessionHome: string,
 ): Promise<void> {
   for await (const state of spawnedStates(spawnStateHomeOrSessionHome)) {
-    const { pid, pidAlive, upstreamUrl, context } = state;
+    const { pid, pidAlive, context, context: { service: { upstreamUrl } } } =
+      state;
 
     const kind = context.service.kind;
     const nature = context.supplier.nature;
@@ -36,6 +34,65 @@ export async function lsSpawnedStates(
         dim("/")
       }${natureLabel}${dim(")")}`,
     );
+  }
+}
+
+export async function lsProcesses(
+  opts: Readonly<{ extended?: boolean }> = {},
+): Promise<void> {
+  const extended = opts.extended === true;
+
+  for await (const p of taggedProcesses()) {
+    const pidLabel = green(String(p.pid));
+
+    const kind = p.context?.service?.kind ?? "unknown";
+    const nature = p.context?.supplier?.nature ?? "unknown";
+
+    const kindLabel = cyan(kind);
+    const natureLabel = dim(nature);
+
+    const upstreamUrl = p.context
+      ? p.context.service.upstreamUrl
+      : "(no context)";
+
+    const urlLabel = yellow(upstreamUrl);
+
+    console.log(
+      `🟢 [${pidLabel}] ${urlLabel} ${dim("(")}${kindLabel}${
+        dim("/")
+      }${natureLabel}${dim(")")}`,
+    );
+
+    if (!extended) continue;
+
+    const extras: string[] = [];
+
+    if (p.issue) {
+      if (p.issue instanceof AggregateError) {
+        extras.push(
+          `issue=${
+            p.issue.errors.map((e) =>
+              e instanceof Error ? e.message : String(e)
+            ).join(" | ")
+          }`,
+        );
+      } else if (p.issue instanceof Error) {
+        extras.push(`issue=${p.issue.message}`);
+      } else {
+        extras.push(`issue=${String(p.issue)}`);
+      }
+    }
+
+    if (p.sessionId) extras.push(`sessionId=${p.sessionId}`);
+    if (p.serviceId) extras.push(`serviceId=${p.serviceId}`);
+    if (p.contextPath) extras.push(`contextPath=${p.contextPath}`);
+    if (p.cmdline) extras.push(`cmdline=${p.cmdline}`);
+
+    if (extras.length > 0) {
+      console.log(dim(`  ${extras.join("  ")}`));
+    } else {
+      console.log(dim(`  (no extra details)`));
+    }
   }
 }
 
@@ -99,6 +156,7 @@ await new Command()
     `Start with essential verbosity`,
     "yard.ts start --verbose essential",
   )
+  .example(`List Linux processes started by yard.ts`, "yard.ts ps -e")
   .example(
     `List all managed processes in ${defaultSpawnStateHome}`,
     "yard.ts ls",
@@ -142,7 +200,7 @@ await new Command()
     }
 
     if (ls) {
-      await lsSpawnedStates(spawnStateHome);
+      await lsProcesses();
     }
   })
   .command(
@@ -353,7 +411,10 @@ await new Command()
       Deno.removeSignalListener("SIGTERM", stop);
     } catch { /* ignore */ }
   })
-  .command("ls", `List managed processes (default ${defaultSpawnStateHome})`)
+  .command(
+    "ls",
+    `List upstream URLs and PIDs from spawned states (default ${defaultSpawnStateHome})`,
+  )
   .option(
     "--spawn-state-home <dir:string>",
     `Spawn state home (default ${defaultSpawnStateHome})`,
@@ -361,6 +422,11 @@ await new Command()
   )
   .action(async ({ spawnStateHome }) => {
     await lsSpawnedStates(spawnStateHome);
+  })
+  .command("ps", `List Linux tagged processes`)
+  .option("-e, --extended", `Show provenance details`)
+  .action(async (options) => {
+    await lsProcesses(options);
   })
   .command(
     "proxy-conf",
@@ -449,7 +515,7 @@ await new Command()
   )
   .option("--clean", "Remove spawn-state home after killing processes")
   .action(async ({ clean, spawnStateHome }) => {
-    await killSpawnedStates(spawnStateHome);
+    await killSpawnedProcesses();
     if (clean) {
       Deno.remove(spawnStateHome, { recursive: true }).catch(() => undefined);
     } else {

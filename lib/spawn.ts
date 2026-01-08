@@ -1,6 +1,6 @@
 // lib/spawn.ts
 import { ensureDir } from "@std/fs";
-import { dirname, relative } from "@std/path";
+import { dirname, relative, resolve } from "@std/path";
 
 import type { Path } from "./discover.ts";
 import { tabular, type TabularDataSupplier } from "./tabular.ts";
@@ -208,6 +208,7 @@ export type SpawnedContext = Readonly<{
     kind: ExposableService["kind"];
     label: string;
     proxyEndpointPrefix: string;
+    upstreamUrl: string;
   }>;
 
   supplier: TabularDataSupplier;
@@ -262,6 +263,29 @@ export async function readProcCmdline(
   } catch {
     return undefined;
   }
+}
+
+function parseProcEnviron(bytes: Uint8Array): Record<string, string> {
+  const text = new TextDecoder().decode(bytes);
+  const out: Record<string, string> = {};
+  // /proc/<pid>/environ is NUL-separated KEY=VAL strings
+  for (const part of text.split("\u0000")) {
+    if (!part) continue;
+    const eq = part.indexOf("=");
+    if (eq <= 0) continue;
+    const k = part.slice(0, eq);
+    const v = part.slice(eq + 1);
+    out[k] = v;
+  }
+  return out;
+}
+
+export async function readProcEnviron(
+  pid: number,
+): Promise<Record<string, string>> {
+  const path = `/proc/${pid}/environ`;
+  const bytes = await Deno.readFile(path);
+  return parseProcEnviron(bytes);
 }
 
 export async function killPID(pid: number): Promise<void> {
@@ -385,6 +409,7 @@ export async function* spawn(
       continue;
     }
 
+    // decision is now narrowed to the object branch
     await emit({ type: "expose_decision", serviceId: id, shouldSpawn: true });
 
     const proxyEndpointPrefix = decision.proxyEndpointPrefix;
@@ -435,6 +460,7 @@ export async function* spawn(
 
     try {
       let child: SpawnedProcess;
+      const contextPathAbs = ctxPath ? resolve(ctxPath) : undefined;
 
       if (service.kind === "sqlpage") {
         child = await service.spawn({
@@ -447,6 +473,13 @@ export async function* spawn(
             sqlpageEnv,
             stdoutLogPath: stdoutPath,
             stderrLogPath: stderrPath,
+            processTags: contextPathAbs
+              ? {
+                sessionId: session.sessionId,
+                serviceId: id,
+                contextPath: contextPathAbs,
+              }
+              : undefined,
           },
           exposableServiceConf,
         });
@@ -460,12 +493,23 @@ export async function* spawn(
             surveilrBin,
             stdoutLogPath: stdoutPath,
             stderrLogPath: stderrPath,
+            processTags: contextPathAbs
+              ? {
+                sessionId: session.sessionId,
+                serviceId: id,
+                contextPath: contextPathAbs,
+              }
+              : undefined,
           },
           exposableServiceConf,
         });
       }
 
       await emit({ type: "spawned", serviceId: id, pid: child.pid });
+      const upstreamUrl = joinUrl(
+        baseUrl,
+        proxyEndpointPrefix === "" ? "/" : proxyEndpointPrefix,
+      );
 
       const ctx: SpawnedContext = {
         startedAt: new Date().toISOString(),
@@ -474,6 +518,7 @@ export async function* spawn(
           kind: service.kind,
           label: service.label,
           proxyEndpointPrefix,
+          upstreamUrl,
         },
         supplier,
         session,
@@ -570,6 +615,152 @@ export async function* spawn(
   await emit({ type: "session_end", summary, totalMs: performance.now() - t0 });
 
   return summary;
+}
+
+/* -------------------------- Linux tagged process ls -------------------------- */
+
+export type TaggedProcess = Readonly<{
+  pid: number;
+
+  // Always sourced from env tags (source of truth for “owned by db-yard”)
+  sessionId: string;
+  serviceId: string;
+  contextPath: string;
+
+  // Full env (best-effort; includes the three tags)
+  env: Record<string, string>;
+
+  // Best-effort enrichments
+  context?: SpawnedContext;
+  cmdline?: string;
+
+  // If we found a tagged process but could not fully enrich it.
+  issue?: Error | unknown;
+
+  // If context could be read, indicate whether it matches env tags.
+  tagMismatch?: Readonly<{
+    sessionId?: { env: string; ctx?: string };
+    serviceId?: { env: string; ctx?: string };
+    contextPath?: { env: string; ctx?: string };
+  }>;
+}>;
+
+/**
+ * Linux-only: yield all processes "owned" by db-yard using env tags:
+ * - DB_YARD_CONTEXT_PATH
+ * - DB_YARD_SESSION_ID
+ * - DB_YARD_SERVICE_ID
+ *
+ * Notes:
+ * - Requires permission to read /proc/<pid>/environ for target processes.
+ * - Skips processes we cannot inspect (/proc perms) or that don't include all tags.
+ * - Reads cmdline and context.json best-effort; yields even if those enrichments fail.
+ */
+export async function* taggedProcesses(): AsyncGenerator<TaggedProcess> {
+  if (Deno.build.os !== "linux") {
+    throw new Error("taggedProcesses() is Linux-only (requires /proc).");
+  }
+
+  let dir: AsyncIterable<Deno.DirEntry>;
+  try {
+    dir = Deno.readDir("/proc");
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`taggedProcesses(): cannot read /proc: ${msg}`);
+  }
+
+  for await (const e of dir) {
+    if (!e.isDirectory) continue;
+
+    const name = e.name;
+    if (!/^\d+$/.test(name)) continue;
+
+    const pid = Number(name);
+    if (!Number.isFinite(pid) || pid <= 0) continue;
+
+    let env: Record<string, string>;
+    try {
+      env = await readProcEnviron(pid);
+    } catch {
+      continue;
+    }
+
+    const envContextPath = env["DB_YARD_CONTEXT_PATH"];
+    if (typeof envContextPath !== "string" || envContextPath.length === 0) {
+      continue;
+    }
+
+    const contextPath = envContextPath;
+
+    let cmdline: string | undefined;
+    try {
+      cmdline = await readProcCmdline(pid);
+    } catch {
+      cmdline = undefined;
+    }
+
+    let issue: Error | unknown;
+    let context: SpawnedContext | undefined;
+
+    try {
+      const ctxContent = await Deno.readTextFile(contextPath);
+      context = JSON.parse(ctxContent) as SpawnedContext;
+    } catch (e) {
+      issue = e;
+      context = undefined;
+    }
+
+    // Prefer context.json values when available, fall back to env.
+    let sessionId = "";
+    if (context?.session?.sessionId) sessionId = context.session.sessionId;
+    else if (typeof env["DB_YARD_SESSION_ID"] === "string") {
+      sessionId = env["DB_YARD_SESSION_ID"];
+    }
+
+    let serviceId = "";
+    if (context?.service?.id) serviceId = context.service.id;
+    else if (typeof env["DB_YARD_SERVICE_ID"] === "string") {
+      serviceId = env["DB_YARD_SERVICE_ID"];
+    }
+
+    // Validate pid consistency: /proc/<pid> vs context.spawned.pid
+    const ctxPidRaw = (context as unknown as { spawned?: { pid?: unknown } })
+      ?.spawned?.pid;
+    const ctxPid = typeof ctxPidRaw === "number"
+      ? ctxPidRaw
+      : Number(ctxPidRaw);
+
+    if (context && Number.isFinite(ctxPid) && ctxPid > 0 && ctxPid !== pid) {
+      const pidIssue = new Error(
+        `PID mismatch: /proc pid=${pid} but context.spawned.pid=${ctxPid} (contextPath=${contextPath})`,
+      );
+      if (issue) {
+        issue = new AggregateError(
+          [issue, pidIssue],
+          "taggedProcesses(): issues detected",
+        );
+      } else {
+        issue = pidIssue;
+      }
+    }
+
+    yield {
+      pid,
+      sessionId,
+      serviceId,
+      env,
+      contextPath,
+      context,
+      cmdline,
+      issue,
+    } satisfies TaggedProcess;
+  }
+}
+
+export async function killSpawnedProcesses() {
+  for await (const { pid } of taggedProcesses()) {
+    await killPID(pid);
+  }
 }
 
 /* -------------------------------- helpers -------------------------------- */
