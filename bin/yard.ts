@@ -104,7 +104,7 @@ export async function lsProcesses(
   }
 }
 
-async function printReconcile(
+async function psReconcile(
   spawnStateHomeOrSessionHome: string,
 ): Promise<void> {
   const base = spawnStateHomeOrSessionHome;
@@ -171,7 +171,7 @@ const verboseType = new EnumType(["essential", "comprehensive"] as const);
 const proxyType = new EnumType(["nginx", "traefik", "both"] as const);
 
 const defaultCargoHome = "./cargo.d";
-const defaultSpawnStateHome = "./spawned.d";
+const defaultLedgerHome = "./ledger.d";
 
 await new Command()
   .name("yard.ts")
@@ -186,11 +186,11 @@ await new Command()
   )
   .example(`List Linux processes started by yard.ts`, "yard.ts ps -e")
   .example(
-    `List all managed processes in ${defaultSpawnStateHome}`,
+    `List all managed processes in ${defaultLedgerHome}`,
     "yard.ts ls",
   )
   .example(
-    `Stop (kill) all managed processes in ${defaultSpawnStateHome}`,
+    `Stop (kill) all managed processes in ${defaultLedgerHome}`,
     "yard.ts kill",
   )
   .example(
@@ -209,17 +209,17 @@ await new Command()
     { default: defaultCargoHome },
   )
   .option(
-    "--spawn-state-home <dir:string>",
-    `Spawn state home (default ${defaultSpawnStateHome})`,
-    { default: defaultSpawnStateHome },
+    "--ledger-home <dir:string>",
+    `Spawn state home (default ${defaultLedgerHome})`,
+    { default: defaultLedgerHome },
   )
   .option("--verbose <level:verbose>", "Spawn/materialize verbosity")
   .option("--summarize", "Summarize after spawning")
   .option("--no-ls", "Don't list after spawning")
-  .action(async ({ summarize, verbose, ls, cargoHome, spawnStateHome }) => {
+  .action(async ({ summarize, verbose, ls, cargoHome, ledgerHome }) => {
     const result = await materialize([{ path: cargoHome }], {
       verbose: verbose ? verbose : false,
-      spawnedLedgerHome: spawnStateHome,
+      spawnedLedgerHome: ledgerHome,
     });
 
     if (summarize) {
@@ -233,15 +233,15 @@ await new Command()
   })
   .command(
     "ls",
-    `List upstream URLs and PIDs from spawned states (default ${defaultSpawnStateHome})`,
+    `List upstream URLs and PIDs from spawned states (default ${defaultLedgerHome})`,
   )
   .option(
-    "--spawn-state-home <dir:string>",
-    `Spawn state home (default ${defaultSpawnStateHome})`,
-    { default: defaultSpawnStateHome },
+    "--ledger-home <dir:string>",
+    `Spawn state home (default ${defaultLedgerHome})`,
+    { default: defaultLedgerHome },
   )
-  .action(async ({ spawnStateHome }) => {
-    await lsLedgers(spawnStateHome);
+  .action(async ({ ledgerHome }) => {
+    await lsLedgers(ledgerHome);
   })
   .command("ps", `List Linux tagged processes`)
   .option("-e, --extended", `Show provenance details`)
@@ -250,15 +250,15 @@ await new Command()
     `Also reconcile tagged processes vs spawned ledger (context.json files)`,
   )
   .option(
-    "--spawn-state-home <dir:string>",
-    `Spawn state home OR a specific sessionHome (default ${defaultSpawnStateHome})`,
-    { default: defaultSpawnStateHome },
+    "--ledger-home <dir:string>",
+    `Spawn state home OR a specific sessionHome (default ${defaultLedgerHome})`,
+    { default: defaultLedgerHome },
   )
   .action(async (options) => {
-    await lsProcesses(options);
     if (options.reconcile) {
-      console.log("");
-      await printReconcile(options.spawnStateHome);
+      await psReconcile(options.ledgerHome);
+    } else {
+      await lsProcesses(options);
     }
   })
   .command(
@@ -267,9 +267,9 @@ await new Command()
   )
   .type("proxy", proxyType)
   .option(
-    "--spawn-state-home <dir:string>",
-    `Spawn state home (default ${defaultSpawnStateHome})`,
-    { default: defaultSpawnStateHome },
+    "--ledger-home <dir:string>",
+    `Spawn state home (default ${defaultLedgerHome})`,
+    { default: defaultLedgerHome },
   )
   .option("--type <type:proxy>", "Which config(s) to generate", {
     default: "nginx",
@@ -337,20 +337,20 @@ await new Command()
   })
   .command(
     "kill",
-    `Stop (kill) managed processes (default ${defaultSpawnStateHome})`,
+    `Stop (kill) managed processes (default ${defaultLedgerHome})`,
   )
   .option(
-    "--spawn-state-home <dir:string>",
-    `Spawn state home (default ${defaultSpawnStateHome})`,
-    { default: defaultSpawnStateHome },
+    "--ledger-home <dir:string>",
+    `Spawn state home (default ${defaultLedgerHome})`,
+    { default: defaultLedgerHome },
   )
-  .option("--clean", "Remove spawn-state home after killing processes")
-  .action(async ({ clean, spawnStateHome }) => {
+  .option("--clean", "Remove ledger root after killing processes")
+  .action(async ({ clean, ledgerHome }) => {
     await killSpawnedProcesses();
     if (clean) {
-      Deno.remove(spawnStateHome, { recursive: true }).catch(() => undefined);
+      Deno.remove(ledgerHome, { recursive: true }).catch(() => undefined);
     } else {
-      await lsLedgers(spawnStateHome);
+      await lsLedgers(ledgerHome);
     }
   })
   .command("help", new HelpCommand())
