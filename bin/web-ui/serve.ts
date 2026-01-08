@@ -113,6 +113,8 @@ function buildProxyTableWithConflicts(processes: TaggedProcess[]) {
     if (sid && !sid.includes("/")) {
       raw.push({ basePath: `/${sid}`, upstreamUrl });
     }
+
+    // NOTE: do NOT add sessionId fallback mapping (usually UUID/noisy)
   }
 
   // keep first mapping, but record conflicts
@@ -263,7 +265,6 @@ async function main() {
 
   const app = new Hono();
 
-  // Everything "owned" by this web-ui must live under /.db-yard/*
   const mount = "/.db-yard";
   const assetsMount = `${mount}/asset`;
   const uiMount = `${mount}/ui`;
@@ -280,7 +281,7 @@ async function main() {
   app.get(
     `${assetsMount}/*`,
     serveStatic({
-      root: ".", // project root
+      root: ".",
       rewriteRequestPath: (path) => {
         const rel = path.slice((assetsMount + "/").length);
         return `/${assetsDir}/${rel}`;
