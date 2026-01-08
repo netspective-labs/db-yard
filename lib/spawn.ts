@@ -466,9 +466,13 @@ export async function* spawn(
     try {
       let child: SpawnedProcess;
       const contextPathAbs = ctxPath ? resolve(ctxPath) : undefined;
+      const provenance = Deno.realPathSync(
+        resolve(service.supplier.location),
+      );
 
       const tags = contextPathAbs
         ? {
+          provenance,
           sessionId: session.sessionId,
           serviceId: id,
           contextPath: contextPathAbs,
@@ -630,9 +634,10 @@ export type TaggedProcess = Readonly<{
   pid: number;
 
   // Always sourced from env tags (source of truth for “owned by db-yard”)
+  provenance: string;
+  contextPath: string;
   sessionId: string;
   serviceId: string;
-  contextPath: string;
 
   kind?: string;
   label?: string;
@@ -648,27 +653,11 @@ export type TaggedProcess = Readonly<{
 
   // If we found a tagged process but could not fully enrich it.
   issue?: Error | unknown;
-
-  // If context could be read, indicate whether it matches env tags.
-  tagMismatch?: Readonly<{
-    sessionId?: { env: string; ctx?: string };
-    serviceId?: { env: string; ctx?: string };
-    contextPath?: { env: string; ctx?: string };
-    kind?: { env?: string; ctx?: string };
-    label?: { env?: string; ctx?: string };
-    proxyEndpointPrefix?: { env?: string; ctx?: string };
-    upstreamUrl?: { env?: string; ctx?: string };
-  }>;
 }>;
-
-function mismatch(envVal: string | undefined, ctxVal: string | undefined) {
-  if (envVal === undefined && ctxVal === undefined) return undefined;
-  if ((envVal ?? "") === (ctxVal ?? "")) return undefined;
-  return { env: String(envVal ?? ""), ctx: ctxVal };
-}
 
 /**
  * Linux-only: yield all processes "owned" by db-yard using env tags:
+ * - DB_YARD_PROVENANCE
  * - DB_YARD_CONTEXT_PATH
  * - DB_YARD_SESSION_ID
  * - DB_YARD_SERVICE_ID
@@ -711,12 +700,28 @@ export async function* taggedProcesses(): AsyncGenerator<TaggedProcess> {
       continue;
     }
 
+    const envProvenance = env["DB_YARD_PROVENANCE"];
+    if (typeof envProvenance !== "string" || envProvenance.length === 0) {
+      continue;
+    }
+
     const envContextPath = env["DB_YARD_CONTEXT_PATH"];
     if (typeof envContextPath !== "string" || envContextPath.length === 0) {
       continue;
     }
 
+    const sessionId = env["DB_YARD_SESSION_ID"];
+    if (typeof sessionId !== "string" || sessionId.length === 0) {
+      continue;
+    }
+
+    const serviceId = env["DB_YARD_SERVICE_ID"];
+    if (typeof serviceId !== "string" || serviceId.length === 0) {
+      continue;
+    }
+
     const contextPath = envContextPath;
+    const provenance = envProvenance;
 
     let cmdline: string | undefined;
     try {
@@ -731,59 +736,24 @@ export async function* taggedProcesses(): AsyncGenerator<TaggedProcess> {
     try {
       const ctxContent = await Deno.readTextFile(contextPath);
       context = JSON.parse(ctxContent) as SpawnedContext;
-    } catch (e2) {
-      issue = e2;
+    } catch (e) {
+      issue = e;
       context = undefined;
     }
 
-    const envSessionId = typeof env["DB_YARD_SESSION_ID"] === "string"
-      ? env["DB_YARD_SESSION_ID"]
-      : undefined;
-    const envServiceId = typeof env["DB_YARD_SERVICE_ID"] === "string"
-      ? env["DB_YARD_SERVICE_ID"]
-      : undefined;
-
-    const envKind = typeof env["DB_YARD_KIND"] === "string"
+    const kind = typeof env["DB_YARD_KIND"] === "string"
       ? env["DB_YARD_KIND"]
       : undefined;
-    const envLabel = typeof env["DB_YARD_LABEL"] === "string"
+    const label = typeof env["DB_YARD_LABEL"] === "string"
       ? env["DB_YARD_LABEL"]
       : undefined;
-    const envProxy = typeof env["DB_YARD_PROXY_ENDPOINT_PREFIX"] === "string"
-      ? env["DB_YARD_PROXY_ENDPOINT_PREFIX"]
-      : undefined;
-    const envUpstream = typeof env["DB_YARD_UPSTREAM_URL"] === "string"
+    const proxyEndpointPrefix =
+      typeof env["DB_YARD_PROXY_ENDPOINT_PREFIX"] === "string"
+        ? env["DB_YARD_PROXY_ENDPOINT_PREFIX"]
+        : undefined;
+    const upstreamUrl = typeof env["DB_YARD_UPSTREAM_URL"] === "string"
       ? env["DB_YARD_UPSTREAM_URL"]
       : undefined;
-
-    const ctxSessionId = context?.session?.sessionId;
-    const ctxServiceId = context?.service?.id;
-    const ctxKind = context?.service?.kind;
-    const ctxLabel = context?.service?.label;
-    const ctxProxy = context?.service?.proxyEndpointPrefix;
-    const ctxUpstream = context?.service?.upstreamUrl;
-
-    const tagMismatch = {
-      sessionId: mismatch(envSessionId, ctxSessionId),
-      serviceId: mismatch(envServiceId, ctxServiceId),
-      contextPath: mismatch(envContextPath, contextPath),
-      kind: mismatch(envKind, ctxKind),
-      label: mismatch(envLabel, ctxLabel),
-      proxyEndpointPrefix: mismatch(envProxy, ctxProxy),
-      upstreamUrl: mismatch(envUpstream, ctxUpstream),
-    };
-
-    const hasAnyMismatch = Object.values(tagMismatch).some((v) =>
-      v !== undefined
-    );
-
-    // Prefer context.json values when available, fall back to env.
-    const sessionId = ctxSessionId ?? envSessionId ?? "";
-    const serviceId = ctxServiceId ?? envServiceId ?? "";
-    const kind = ctxKind ?? envKind;
-    const label = ctxLabel ?? envLabel;
-    const proxyEndpointPrefix = ctxProxy ?? envProxy;
-    const upstreamUrl = ctxUpstream ?? envUpstream;
 
     // Validate pid consistency: /proc/<pid> vs context.spawned.pid
     const ctxPidRaw = (context as unknown as { spawned?: { pid?: unknown } })
@@ -811,17 +781,15 @@ export async function* taggedProcesses(): AsyncGenerator<TaggedProcess> {
       sessionId,
       serviceId,
       contextPath,
-
-      kind,
-      label,
-      proxyEndpointPrefix,
-      upstreamUrl,
-
+      provenance,
       env,
       context,
       cmdline,
       issue,
-      tagMismatch: hasAnyMismatch ? tagMismatch : undefined,
+      kind,
+      label,
+      proxyEndpointPrefix,
+      upstreamUrl,
     } satisfies TaggedProcess;
   }
 }

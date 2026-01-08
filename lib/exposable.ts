@@ -1,7 +1,6 @@
 // lib/exposable.ts
-import { basename } from "@std/path";
+import { resolve } from "@std/path";
 import { ensureParentDir } from "./fs.ts";
-import { normalizeSlash, safeRelFromRoot } from "./path.ts";
 import type {
   SqlPageDataSupplier,
   SurveilrDataSupplier,
@@ -191,6 +190,7 @@ export type ExposableInit = Readonly<{
    * plus additional context to make /proc inspection self-describing.
    */
   processTags?: Readonly<{
+    provenance: string;
     sessionId: string;
     serviceId: string;
     contextPath: string;
@@ -306,13 +306,12 @@ export async function* exposable(
 /* --------------------------- exposable builders --------------------------- */
 
 function makeSqlPageService(s: SqlPageDataSupplier): SqlPageExposableService {
-  const id = stableServiceIdFromSupplier(s);
   return {
     nature: "service",
     kind: "sqlpage",
     supplier: s,
-    id,
-    label: `sqlpage:${id}`,
+    id: s.dbPath,
+    label: `sqlpage:${s.dbPath}`,
     spawn: async ({ host, init, exposableServiceConf }) => {
       const plan = buildSqlPageSpawnPlan({
         dbPath: s.dbPath,
@@ -327,13 +326,12 @@ function makeSqlPageService(s: SqlPageDataSupplier): SqlPageExposableService {
 function makeSurveilrService(
   s: SurveilrDataSupplier,
 ): SurveilrExposableService {
-  const id = stableServiceIdFromSupplier(s);
   return {
     nature: "service",
     kind: "surveilr",
     supplier: s,
-    id,
-    label: `surveilr:${id}`,
+    id: s.dbPath,
+    label: `surveilr:${s.dbPath}`,
     spawn: async ({ host, init, exposableServiceConf }) => {
       const plan = buildSurveilrSpawnPlan({
         dbPath: s.dbPath,
@@ -355,6 +353,7 @@ function processTagsEnv(init: ExposableInit): Record<string, string> {
   const t = init.processTags;
   if (!t) return {};
   return {
+    DB_YARD_PROVENANCE: resolve(t.provenance),
     DB_YARD_CONTEXT_PATH: t.contextPath,
     DB_YARD_SESSION_ID: t.sessionId,
     DB_YARD_SERVICE_ID: t.serviceId,
@@ -406,7 +405,7 @@ function buildSqlPageSpawnPlan(args: {
       ...extraEnv,
       ...envBlock,
     },
-    tag: `sqlpage:${stableServiceIdFromDbPath(dbPath, undefined)}`,
+    tag: `sqlpage:${dbPath}`,
     stdoutLogPath: init.stdoutLogPath,
     stderrLogPath: init.stderrLogPath,
   };
@@ -441,7 +440,7 @@ function buildSurveilrSpawnPlan(args: {
       ...processTagsEnv(init),
       ...envBlock,
     },
-    tag: `surveilr:${stableServiceIdFromDbPath(dbPath, undefined)}`,
+    tag: `surveilr:${dbPath}`,
     stdoutLogPath: init.stdoutLogPath,
     stderrLogPath: init.stderrLogPath,
   };
@@ -516,33 +515,4 @@ function unquoteAndUnescape(v: string): string {
     }
   }
   return t;
-}
-
-/* --------------------------------- ids ---------------------------------- */
-
-function sanitizeServiceId(raw: string): string {
-  const s = normalizeSlash(String(raw ?? "")).trim().toLowerCase();
-  return s.replaceAll(/[^a-z0-9._/-]+/g, "-")
-    .replaceAll(/\//g, "-")
-    .replaceAll(/-+/g, "-")
-    .replaceAll(/^-+|-+$/g, "");
-}
-
-function stableServiceIdFromDbPath(
-  dbPath: string,
-  srcRoot: string | undefined,
-): string {
-  const rel = srcRoot ? safeRelFromRoot(srcRoot, dbPath) : dbPath;
-  // Ensure we incorporate directory structure when available.
-  const raw = rel && rel !== dbPath ? rel : basename(dbPath);
-  const id = sanitizeServiceId(raw);
-  return id.length ? id : sanitizeServiceId(basename(dbPath));
-}
-
-function stableServiceIdFromSupplier(
-  s: SqlPageDataSupplier | SurveilrDataSupplier,
-): string {
-  const root = s.srcPath?.path;
-  const loc = s.location ?? s.dbPath;
-  return stableServiceIdFromDbPath(loc, root);
 }
