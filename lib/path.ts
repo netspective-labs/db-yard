@@ -55,12 +55,28 @@ export function contentTypeByName(name: string): string {
   return "application/octet-stream";
 }
 
+function stripCompoundDbExt(p: string): string {
+  const lower = p.toLowerCase();
+
+  const compounds = [
+    ".sqlite.db",
+    ".sqlite3.db",
+    ".duckdb.db",
+  ];
+
+  for (const suf of compounds) {
+    if (lower.endsWith(suf)) return p.slice(0, -suf.length);
+  }
+
+  return stripOneExt(p);
+}
+
 /**
  * materialize/watch/web-ui canonical proxy prefix:
  * derived from the discovered DB path relative to its best root.
  */
 export function proxyPrefixFromRel(relFromRoot: string): string {
-  const relNoExt = stripOneExt(relFromRoot);
+  const relNoExt = stripCompoundDbExt(relFromRoot);
   const clean = normalizeSlash(relNoExt).replaceAll(/^\.\//g, "").trim();
   if (!clean) return "/";
   return `/${clean.startsWith("/") ? clean.slice(1) : clean}`.replaceAll(

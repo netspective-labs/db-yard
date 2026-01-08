@@ -4,7 +4,11 @@ import { Command, EnumType } from "@cliffy/command";
 import { CompletionsCommand } from "@cliffy/completions";
 import { HelpCommand } from "@cliffy/help";
 import { blue, cyan, dim, green, red, yellow } from "@std/fmt/colors";
-import { materialize, spawnedLedgerStates } from "../lib/materialize.ts";
+import {
+  materialize,
+  materializeWatch,
+  spawnedLedgerStates,
+} from "../lib/materialize.ts";
 import { generateReverseProxyConfsFromSpawnedStates } from "../lib/reverse-proxy-conf.ts";
 import { killSpawnedProcesses, taggedProcesses } from "../lib/spawn.ts";
 
@@ -117,6 +121,11 @@ await new Command()
     `Start with essential verbosity`,
     "yard.ts start --verbose essential",
   )
+  .example(`Start and keep running in watch mode`, "yard.ts start --watch")
+  .example(
+    `Watch with strict kill scoping (only kill processes started in this watch session)`,
+    "yard.ts start --watch --strict-kills-only",
+  )
   .example(`List Linux processes started by yard.ts`, "yard.ts ps -e")
   .example(
     `List all managed processes in ${defaultSpawnStateHome}`,
@@ -126,14 +135,10 @@ await new Command()
     `Stop (kill) all managed processes in ${defaultSpawnStateHome}`,
     "yard.ts kill",
   )
-  .example(
-    `Continuously watch ${defaultCargoHome} and keep services in sync`,
-    "yard.ts watch",
-  )
   .example(`Start web UI + watcher`, "yard.ts web-ui --watch")
   .command(
     "start",
-    `Start exposable databases (default root ${defaultCargoHome}) and exit`,
+    `Start exposable databases (default root ${defaultCargoHome}) and exit (or --watch to keep in sync)`,
   )
   .type("verbose", verboseType)
   .option(
@@ -147,23 +152,89 @@ await new Command()
     { default: defaultSpawnStateHome },
   )
   .option("--verbose <level:verbose>", "Spawn/materialize verbosity")
-  .option("--summarize", "Summarize after spawning")
+  .option(
+    "--summarize",
+    "Summarize after spawning (and after each watch cycle)",
+  )
   .option("--no-ls", "Don't list after spawning")
-  .action(async ({ summarize, verbose, ls, cargoHome, spawnStateHome }) => {
-    const result = await materialize([{ path: cargoHome }], {
-      verbose: verbose ? verbose : false,
-      spawnedLedgerHome: spawnStateHome,
-    });
+  // ---- new: watch + useful knobs ----
+  .option(
+    "--watch",
+    `Continuously watch cargo and keep services in sync (spawns new, kills removed)`,
+  )
+  .option(
+    "--watch-debounce-ms <ms:number>",
+    "Watch debounce window (default 750ms)",
+    { default: 750 },
+  )
+  .option(
+    "--strict-kills-only",
+    "Watch: only kill processes whose provenance AND sessionId match this watch session (default off)",
+  )
+  .option(
+    "--no-smart-spawn",
+    "Disable smartSpawn (default on). When on, avoids spawning a DB if already running (Linux taggedProcesses).",
+  )
+  .action(
+    async (
+      {
+        summarize,
+        verbose,
+        ls,
+        cargoHome,
+        spawnStateHome,
+        watch,
+        watchDebounceMs,
+        strictKillsOnly,
+        smartSpawn,
+      },
+    ) => {
+      const v = verbose ? verbose : false;
 
-    if (summarize) {
-      console.log(`sessionHome: ${result.sessionHome}`);
-      console.log("summary:", result.summary);
-    }
+      if (watch) {
+        for await (
+          const result of materializeWatch([{ path: cargoHome }], {
+            verbose: v,
+            spawnedLedgerHome: spawnStateHome,
+            smartSpawn: smartSpawn !== false, // default true; --no-smart-spawn flips it to false
+            watch: {
+              enabled: true,
+              debounceMs: watchDebounceMs,
+              strictKillsOnly: strictKillsOnly ? true : false,
+            },
+          })
+        ) {
+          if (summarize) {
+            console.log(`sessionHome: ${result.sessionHome}`);
+            if (result.sessionId) console.log(`sessionId: ${result.sessionId}`);
+            console.log("summary:", result.summary);
+          }
 
-    if (ls) {
-      await lsProcesses();
-    }
-  })
+          if (ls) {
+            await lsProcesses();
+          }
+        }
+
+        return;
+      }
+
+      const result = await materialize([{ path: cargoHome }], {
+        verbose: v,
+        spawnedLedgerHome: spawnStateHome,
+        smartSpawn: smartSpawn !== false, // default true
+      });
+
+      if (summarize) {
+        console.log(`sessionHome: ${result.sessionHome}`);
+        if (result.sessionId) console.log(`sessionId: ${result.sessionId}`);
+        console.log("summary:", result.summary);
+      }
+
+      if (ls) {
+        await lsProcesses();
+      }
+    },
+  )
   .command(
     "ls",
     `List upstream URLs and PIDs from spawned states (default ${defaultSpawnStateHome})`,
