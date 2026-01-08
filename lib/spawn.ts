@@ -184,6 +184,8 @@ export type SpawnOptions = Readonly<{
   host?: SpawnHost;
   listenHost?: string;
   portStart?: number;
+  findFreePort?: boolean;
+  portMax?: number; // Optional upper bound for scanning. If omitted, defaults to 65535.
 
   sqlpageBin?: string;
   sqlpageEnv?: string;
@@ -328,6 +330,52 @@ export async function killPID(pid: number): Promise<void> {
   killSingle("SIGKILL");
 }
 
+/* ------------------------------ port helpers ------------------------------ */
+
+// deno-lint-ignore require-await
+async function isPortAvailable(
+  listenHost: string,
+  port: number,
+): Promise<boolean> {
+  let listener: Deno.Listener | undefined;
+  try {
+    listener = Deno.listen({ hostname: listenHost, port });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    try {
+      listener?.close();
+    } catch {
+      // ignore
+    }
+  }
+}
+
+async function allocatePort(
+  args: Readonly<{
+    listenHost: string;
+    candidatePort: number;
+    findFreePort: boolean;
+    portMax: number;
+  }>,
+): Promise<number> {
+  const { listenHost, candidatePort, findFreePort, portMax } = args;
+
+  const start = Math.max(1, Math.floor(candidatePort));
+  const max = Math.min(65535, Math.max(start, Math.floor(portMax)));
+
+  if (!findFreePort) return start;
+
+  for (let p = start; p <= max; p++) {
+    if (await isPortAvailable(listenHost, p)) return p;
+  }
+
+  throw new Error(
+    `No available port found on ${listenHost} in range ${start}-${max}`,
+  );
+}
+
 /* --------------------------------- api ---------------------------------- */
 
 export async function* spawn(
@@ -346,6 +394,12 @@ export async function* spawn(
 
   const listenHost = opts.listenHost ?? "127.0.0.1";
   let port = opts.portStart ?? 3000;
+
+  const findFreePort = opts.findFreePort !== false; // default true
+  const portMax =
+    typeof opts.portMax === "number" && Number.isFinite(opts.portMax)
+      ? opts.portMax
+      : 65535;
 
   const sqlpageBin = opts.sqlpageBin ?? "sqlpage";
   const sqlpageEnv = opts.sqlpageEnv ?? "development";
@@ -415,12 +469,27 @@ export async function* spawn(
     const exposableServiceConf: ExposableServiceConf =
       decision.exposableServiceConf ?? {};
 
-    const baseUrl = `http://${listenHost}:${port}`;
+    let allocatedPort: number;
+    try {
+      allocatedPort = await allocatePort({
+        listenHost,
+        candidatePort: port,
+        findFreePort,
+        portMax,
+      });
+    } catch (error) {
+      errored.push(id);
+      errors.push({ id, error });
+      await emit({ type: "error", serviceId: id, phase: "spawn", error });
+      continue;
+    }
+
+    const baseUrl = `http://${listenHost}:${allocatedPort}`;
     await emit({
       type: "port_allocated",
       serviceId: id,
       listenHost,
-      port,
+      port: allocatedPort,
       baseUrl,
     });
 
@@ -482,7 +551,7 @@ export async function* spawn(
           upstreamUrl,
 
           listenHost,
-          port,
+          port: allocatedPort,
           baseUrl,
           probeUrl,
         }
@@ -493,7 +562,7 @@ export async function* spawn(
           host,
           init: {
             listenHost,
-            port,
+            port: allocatedPort,
             proxyEndpointPrefix,
             sqlpageBin,
             sqlpageEnv,
@@ -508,7 +577,7 @@ export async function* spawn(
           host,
           init: {
             listenHost,
-            port,
+            port: allocatedPort,
             proxyEndpointPrefix,
             surveilrBin,
             stdoutLogPath: stdoutPath,
@@ -534,7 +603,7 @@ export async function* spawn(
         session,
         listen: {
           host: listenHost,
-          port,
+          port: allocatedPort,
           baseUrl,
           probeUrl,
         },
@@ -612,11 +681,13 @@ export async function* spawn(
       spawned.push(id);
       yield ctx;
 
-      port++;
+      // Advance the global port cursor to the next port after the allocated one.
+      port = allocatedPort + 1;
     } catch (error) {
       errored.push(id);
       errors.push({ id, error });
       await emit({ type: "error", serviceId: id, phase: "spawn", error });
+      // Keep existing semantics: only advance port cursor on success.
     }
   }
 
