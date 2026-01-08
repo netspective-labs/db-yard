@@ -13,7 +13,6 @@ import {
   type SpawnedContext,
   type SpawnEventListener,
   type SpawnSummary,
-  type TaggedProcess,
   taggedProcesses,
 } from "./spawn.ts";
 
@@ -149,20 +148,11 @@ export type ReconcileItem =
     pid: number;
     serviceId?: string;
     sessionId?: string;
-  }>
-  | Readonly<{
-    kind: "process_and_ledger_mismatch";
-    pid: number;
-    serviceId: string;
-    sessionId: string;
-    contextPath: string;
-    mismatch: TaggedProcess["tagMismatch"];
   }>;
 
 export type ReconcileSummary = Readonly<{
   processWithoutLedger: number;
   ledgerWithoutProcess: number;
-  mismatched: number;
 }>;
 
 /**
@@ -186,7 +176,6 @@ export async function* reconcile(
 
   // 2) Walk processes and emit process-side discrepancies
   let processWithoutLedger = 0;
-  let mismatched = 0;
 
   const seenLedgerPids = new Set<number>();
 
@@ -211,18 +200,6 @@ export async function* reconcile(
     }
 
     seenLedgerPids.add(ledger.pid);
-
-    if (tp.tagMismatch) {
-      mismatched++;
-      yield {
-        kind: "process_and_ledger_mismatch",
-        pid,
-        serviceId: tp.serviceId,
-        sessionId: tp.sessionId,
-        contextPath: tp.contextPath,
-        mismatch: tp.tagMismatch,
-      };
-    }
   }
 
   // 3) Emit ledger-side discrepancies: contexts whose pid is not alive OR not seen in taggedProcesses
@@ -245,6 +222,5 @@ export async function* reconcile(
   return {
     processWithoutLedger,
     ledgerWithoutProcess,
-    mismatched,
   };
 }
