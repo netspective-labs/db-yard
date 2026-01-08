@@ -1,14 +1,15 @@
 // lib/reverse-proxy-conf.ts
 import { normalize as normalizePath } from "@std/path";
-import { ensureDir, liveSpawnedRecords, normalizeSlash } from "./fs.ts";
-import type { SpawnedProcess } from "./governance.ts";
+import { ensureDir } from "@std/fs";
+
+import { spawnedStates } from "./materialize.ts";
 
 function safeFileName(s: string) {
   return s.replaceAll(/[^A-Za-z0-9._-]/g, "_");
 }
 
 async function writeTextAtomic(path: string, content: string) {
-  const p = normalizeSlash(path);
+  const p = normalizePath(path).replaceAll("\\", "/");
   const dir = p.slice(0, Math.max(0, p.lastIndexOf("/")));
   if (dir) await ensureDir(dir);
   const tmp = `${p}.tmp`;
@@ -25,114 +26,137 @@ function fnv1a32Hex(s: string): string {
   return (h >>> 0).toString(16).padStart(8, "0");
 }
 
-function getCfgString(
-  cfg: Record<string, unknown> | undefined,
-  keys: string[],
-): string | undefined {
-  if (!cfg) return undefined;
-  for (const k of keys) {
-    const v = cfg[k];
-    if (typeof v === "string" && v.trim()) return v.trim();
-  }
-  return undefined;
+function trimTrailingSlashes(s: string): string {
+  return s.replaceAll(/\/+$/g, "");
 }
 
-function getCfgBool(
-  cfg: Record<string, unknown> | undefined,
-  keys: string[],
-): boolean | undefined {
-  if (!cfg) return undefined;
-  for (const k of keys) {
-    const v = cfg[k];
-    if (typeof v === "boolean") return v;
-    if (typeof v === "string") {
-      const t = v.trim().toLowerCase();
-      if (t === "true" || t === "1" || t === "yes" || t === "on") return true;
-      if (t === "false" || t === "0" || t === "no" || t === "off") return false;
-    }
-  }
-  return undefined;
+function ensureTrailingSlash(s: string): string {
+  return s.endsWith("/") ? s : `${s}/`;
 }
 
-function stripDbSuffix(name: string): string {
-  const s = name.trim();
-  if (!s) return "db";
-  if (s.toLowerCase().endsWith(".sqlite.db")) {
-    return s.slice(0, -".sqlite.db".length);
-  }
-  if (s.toLowerCase().endsWith(".db")) return s.slice(0, -".db".length);
-  return s;
-}
-
-function splitDirAndBase(rel: string): { dir: string; base: string } {
-  const p = normalizePath(rel).replace(/^\.\/+/, "").replace(/^\/+/, "");
-  const parts = p.split("/").filter((x) => x.length);
-  const last = parts.pop() ?? "db";
-  const dir = parts.join("/");
-  const base = stripDbSuffix(last) || "db";
-  return { dir, base };
-}
-
-/**
- * Default proxy prefix:
- * - derived from rec.dbRelPath (relative to watch root)
- * - prefix = "/<dir>/<base>/" where <base> is db file name without ".db" or ".sqlite.db"
- * Example: "abc/def/my.sqlite.db" => "/abc/def/my/"
- */
-function defaultLocationPrefix(rec: SpawnedProcess): string {
-  const rel = typeof rec.dbRelPath === "string" && rec.dbRelPath.trim()
-    ? rec.dbRelPath.trim()
-    : rec.dbBasename;
-
-  const { dir, base } = splitDirAndBase(rel);
-  const prefix = dir ? `/${dir}/${base}/` : `/${base}/`;
-  return prefix.replaceAll(/\/+/, "/");
+function escapeForNginxRegexPrefix(pathPrefixWithSlash: string): string {
+  return pathPrefixWithSlash.replaceAll("/", "\\/");
 }
 
 function parseEntryPointsCsv(s: string): string[] {
   return s.split(",").map((x) => x.trim()).filter((x) => x.length > 0);
 }
 
-export function nginxReverseProxyConf(rec: SpawnedProcess): string {
-  const cfg = (rec.dbYardConfig ?? {}) as Record<string, unknown>;
+export type ProxyConfOverrides = Readonly<{
+  nginx?: Readonly<{
+    locationPrefix?: string;
+    serverName?: string;
+    listen?: string;
+    stripPrefix?: boolean;
+    extra?: string;
+  }>;
+  traefik?: Readonly<{
+    locationPrefix?: string;
+    entrypoints?: string; // CSV
+    rule?: string;
+    stripPrefix?: boolean;
+    extra?: string;
+  }>;
+}>;
 
-  const locationPrefix = getCfgString(cfg, [
-    "nginx-proxy-conf.location-prefix",
-    "nginx-proxy-conf-location-prefix",
-  ]) ?? defaultLocationPrefix(rec);
+type SpawnedState = Awaited<ReturnType<typeof spawnedStates>> extends
+  AsyncGenerator<infer S> ? S : never;
 
-  const serverName = getCfgString(cfg, ["nginx-proxy-conf.server-name"]) ?? "_";
+function stateId(s: SpawnedState): string {
+  return s.context.service.id;
+}
 
-  const listen = getCfgString(cfg, ["nginx-proxy-conf.listen"]) ?? "80";
+function stateKind(s: SpawnedState): string {
+  return s.context.service.kind;
+}
 
-  // Default is NO STRIP
-  const stripPrefix = getCfgBool(cfg, ["nginx-proxy-conf.strip-prefix"]) ??
-    false;
+function stateDbPath(s: SpawnedState): string {
+  return (s.context.supplier as { location?: string }).location ?? "";
+}
 
-  const extra = getCfgString(cfg, ["nginx-proxy-conf.extra"]) ?? "";
+function defaultLocationPrefixFromState(s: SpawnedState): string {
+  const p = s.context.service.proxyEndpointPrefix || "/";
+  const norm = p.replaceAll("\\", "/").replaceAll(/\/+/g, "/").trim();
+  return ensureTrailingSlash(norm.startsWith("/") ? norm : `/${norm}`);
+}
 
-  const upstream = `http://${rec.listenHost}:${rec.port}`;
+function upstreamFromState(s: SpawnedState): string {
+  return s.context.listen.baseUrl;
+}
 
-  const name = safeFileName(rec.id);
-  const hash = fnv1a32Hex(rec.id);
+function nginxHeaderLine(name: string, value: string | number): string {
+  // keep header names stable and explicit
+  return `    proxy_set_header X-DB-Yard-${name} "${String(value)}";\n`;
+}
 
-  const lp =
-    (locationPrefix.endsWith("/") ? locationPrefix : `${locationPrefix}/`)
-      .replaceAll(/\/+/, "/");
+function buildNginxDbYardHeaders(args: {
+  id: string;
+  dbPath: string;
+  kind: string;
+  pid: number;
+  upstream: string;
+  proxyPrefix: string;
+}): string {
+  const { id, dbPath, kind, pid, upstream, proxyPrefix } = args;
+  return (
+    nginxHeaderLine("Id", id) +
+    nginxHeaderLine("Db", dbPath) +
+    nginxHeaderLine("Kind", kind) +
+    nginxHeaderLine("Pid", pid) +
+    nginxHeaderLine("Upstream", upstream) +
+    nginxHeaderLine("ProxyPrefix", proxyPrefix)
+  );
+}
+
+function yamlEscape(s: string): string {
+  // simple + safe: always use double quotes and escape backslash + quote
+  return s.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+}
+
+export function nginxReverseProxyConfFromState(
+  s: SpawnedState,
+  overrides: ProxyConfOverrides = {},
+): string {
+  const id = stateId(s);
+  const kind = stateKind(s);
+  const dbPath = stateDbPath(s);
+  const upstream = upstreamFromState(s);
+
+  const locationPrefix = overrides.nginx?.locationPrefix ??
+    defaultLocationPrefixFromState(s);
+
+  const serverName = overrides.nginx?.serverName ?? "_";
+  const listen = overrides.nginx?.listen ?? "80";
+  const stripPrefix = overrides.nginx?.stripPrefix ?? false;
+  const extra = overrides.nginx?.extra ?? "";
+
+  const name = safeFileName(id);
+  const hash = fnv1a32Hex(id);
+
+  const lp = ensureTrailingSlash(locationPrefix).replaceAll(/\/+/g, "/");
 
   const rewriteLine = stripPrefix
-    ? `    rewrite ^${lp.replaceAll("/", "\\/")}(.*)$ /$1 break;\n`
+    ? `    rewrite ^${escapeForNginxRegexPrefix(lp)}(.*)$ /$1 break;\n`
     : "";
 
   const extraBlock = extra.trim() ? `\n${extra.trimEnd()}\n` : "";
 
+  const hdrs = buildNginxDbYardHeaders({
+    id,
+    dbPath,
+    kind,
+    pid: s.pid,
+    upstream,
+    proxyPrefix: lp,
+  });
+
   return `# db-yard nginx reverse proxy (generated)
-# id=${rec.id}
-# db=${rec.dbPath}
-# rel=${rec.dbRelPath ?? ""}
-# kind=${rec.kind}
-# pid=${rec.pid}
+# id=${id}
+# db=${dbPath}
+# kind=${kind}
+# pid=${s.pid}
 # upstream=${upstream}
+# proxyPrefix=${lp}
 
 # Suggested include filename:
 #   db-yard.${name}.${hash}.conf
@@ -149,96 +173,131 @@ ${rewriteLine}    proxy_pass ${upstream};
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
-  }${extraBlock}}
+
+${hdrs}  }${extraBlock}}
 `;
 }
 
-export function traefikReverseProxyConf(rec: SpawnedProcess): string {
-  const cfg = (rec.dbYardConfig ?? {}) as Record<string, unknown>;
+export function traefikReverseProxyConfFromState(
+  s: SpawnedState,
+  overrides: ProxyConfOverrides = {},
+): string {
+  const id = stateId(s);
+  const kind = stateKind(s);
+  const dbPath = stateDbPath(s);
 
-  const locationPrefix =
-    getCfgString(cfg, ["traefik-proxy-conf.location-prefix"]) ??
-      defaultLocationPrefix(rec);
+  const locationPrefix = overrides.traefik?.locationPrefix ??
+    defaultLocationPrefixFromState(s);
 
-  const lpNoTrail = locationPrefix.replaceAll(/\/+$/, "") ||
-    defaultLocationPrefix(rec).replaceAll(/\/+$/, "");
-  const url = `http://${rec.listenHost}:${rec.port}`;
+  const lpNoTrail = trimTrailingSlashes(locationPrefix) ||
+    trimTrailingSlashes(defaultLocationPrefixFromState(s));
 
-  const entrypointsRaw =
-    getCfgString(cfg, ["traefik-proxy-conf.entrypoints"]) ?? "web";
+  const url = upstreamFromState(s);
+
+  const entrypointsRaw = overrides.traefik?.entrypoints ?? "web";
   const entryPoints = parseEntryPointsCsv(entrypointsRaw);
   const entryPointsYaml = entryPoints.length ? entryPoints.join(", ") : "web";
 
   const defaultRule = `PathPrefix(\`${lpNoTrail}/\`)`;
-  const rule = getCfgString(cfg, ["traefik-proxy-conf.rule"]) ?? defaultRule;
+  const rule = overrides.traefik?.rule ?? defaultRule;
 
-  // Default is NO STRIP
-  const stripPrefix = getCfgBool(cfg, ["traefik-proxy-conf.strip-prefix"]) ??
-    false;
+  const stripPrefix = overrides.traefik?.stripPrefix ?? false;
+  const extraYaml = overrides.traefik?.extra ?? "";
 
-  const extraYaml = getCfgString(cfg, ["traefik-proxy-conf.extra"]) ?? "";
-
-  const name = safeFileName(rec.id);
-  const hash = fnv1a32Hex(rec.id);
+  const name = safeFileName(id);
+  const hash = fnv1a32Hex(id);
 
   const routerName = `db-yard-${name}-${hash}`;
   const serviceName = `svc-${name}-${hash}`;
-  const mwName = `mw-strip-${name}-${hash}`;
+  const mwStripName = `mw-strip-${name}-${hash}`;
+  const mwHdrName = `mw-hdr-${name}-${hash}`;
 
-  const mwBlock = stripPrefix
-    ? `
+  const mwBlock = `
   middlewares:
-    ${mwName}:
+    ${mwHdrName}:
+      headers:
+        customRequestHeaders:
+          X-DB-Yard-Id: "${yamlEscape(id)}"
+          X-DB-Yard-Db: "${yamlEscape(dbPath)}"
+          X-DB-Yard-Kind: "${yamlEscape(kind)}"
+          X-DB-Yard-Pid: "${yamlEscape(String(s.pid))}"
+          X-DB-Yard-Upstream: "${yamlEscape(url)}"
+          X-DB-Yard-ProxyPrefix: "${yamlEscape(lpNoTrail + "/")}"${
+    stripPrefix
+      ? `
+    ${mwStripName}:
       stripPrefix:
         prefixes:
-          - "${lpNoTrail}"
-`
-    : "";
+          - "${yamlEscape(lpNoTrail)}"`
+      : ""
+  }
+`;
+
+  const middlewares = stripPrefix
+    ? `[${mwHdrName}, ${mwStripName}]`
+    : `[${mwHdrName}]`;
 
   const extraBlock = extraYaml.trim() ? `\n${extraYaml.trimEnd()}\n` : "";
 
   return `# db-yard traefik dynamic config (generated)
-# id=${rec.id}
-# db=${rec.dbPath}
-# rel=${rec.dbRelPath ?? ""}
-# kind=${rec.kind}
-# pid=${rec.pid}
+# id=${id}
+# db=${dbPath}
+# kind=${kind}
+# pid=${s.pid}
+# upstream=${url}
+# proxyPrefix=${lpNoTrail}/
 http:
   routers:
     ${routerName}:
       rule: ${rule}
       entryPoints: [${entryPointsYaml}]
-      service: ${serviceName}${
-    stripPrefix ? `\n      middlewares: [${mwName}]` : ""
-  }
+      service: ${serviceName}
+      middlewares: ${middlewares}
 
   services:
     ${serviceName}:
       loadBalancer:
         passHostHeader: true
         servers:
-          - url: "${url}"
+          - url: "${yamlEscape(url)}"
 ${mwBlock}${extraBlock}`;
 }
 
-export async function generateReverseProxyConfsFromLiveJson(args: {
-  spawnedStatePath: string;
+export async function generateReverseProxyConfsFromSpawnedStates(args: {
+  spawnStateHome: string;
   nginxConfHome?: string;
   traefikConfHome?: string;
-  verbose: boolean;
+  verbose?: boolean;
+  includeDead?: boolean; // default false
+  overrides?: ProxyConfOverrides;
 }) {
-  const live = await liveSpawnedRecords(args.spawnedStatePath);
+  const spawnStateHome = normalizePath(args.spawnStateHome);
+  const includeDead = args.includeDead ?? false;
+  const overrides = args.overrides ?? {};
+
+  const states: SpawnedState[] = [];
+  for await (const s of spawnedStates(spawnStateHome)) {
+    if (!includeDead && !s.pidAlive) continue;
+    states.push(s);
+  }
 
   if (args.nginxConfHome) {
     const dir = normalizePath(args.nginxConfHome);
     await ensureDir(dir);
 
-    for (const rec of live) {
-      const fn = `db-yard.${safeFileName(rec.id)}.conf`;
-      await writeTextAtomic(`${dir}/${fn}`, nginxReverseProxyConf(rec));
+    for (const s of states) {
+      const id = stateId(s);
+      const fn = `db-yard.${safeFileName(id)}.conf`;
+      await writeTextAtomic(
+        `${dir}/${fn}`,
+        nginxReverseProxyConfFromState(s, overrides),
+      );
     }
 
-    const bundle = live.map((r) => nginxReverseProxyConf(r)).join("\n");
+    const bundle = states.map((s) =>
+      nginxReverseProxyConfFromState(s, overrides)
+    )
+      .join("\n");
     await writeTextAtomic(`${dir}/db-yard.generated.conf`, bundle);
 
     if (args.verbose) {
@@ -252,12 +311,19 @@ export async function generateReverseProxyConfsFromLiveJson(args: {
     const dir = normalizePath(args.traefikConfHome);
     await ensureDir(dir);
 
-    for (const rec of live) {
-      const fn = `db-yard.${safeFileName(rec.id)}.yaml`;
-      await writeTextAtomic(`${dir}/${fn}`, traefikReverseProxyConf(rec));
+    for (const s of states) {
+      const id = stateId(s);
+      const fn = `db-yard.${safeFileName(id)}.yaml`;
+      await writeTextAtomic(
+        `${dir}/${fn}`,
+        traefikReverseProxyConfFromState(s, overrides),
+      );
     }
 
-    const bundle = live.map((r) => traefikReverseProxyConf(r)).join("\n");
+    const bundle = states.map((s) =>
+      traefikReverseProxyConfFromState(s, overrides)
+    )
+      .join("\n");
     await writeTextAtomic(`${dir}/db-yard.generated.yaml`, bundle);
 
     if (args.verbose) {
@@ -268,6 +334,10 @@ export async function generateReverseProxyConfsFromLiveJson(args: {
   }
 
   if (!args.nginxConfHome && !args.traefikConfHome) {
-    console.log(live.map((r) => nginxReverseProxyConf(r)).join("\n"));
+    console.log(
+      states.map((s) => nginxReverseProxyConfFromState(s, overrides)).join(
+        "\n",
+      ),
+    );
   }
 }

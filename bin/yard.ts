@@ -1,408 +1,214 @@
 #!/usr/bin/env -S deno run -A --node-modules-dir=auto
 // bin/yard.ts
-import { Command } from "@cliffy/command";
+import { Command, EnumType } from "@cliffy/command";
 import { CompletionsCommand } from "@cliffy/completions";
 import { HelpCommand } from "@cliffy/help";
-
-import { startWebUiServer } from "../lib/web-ui.ts";
 import {
-  ensureDir,
-  isPidAlive,
-  listSpawnedPidFiles,
-  normalizeSlash,
-  parseListenHost,
-  readPidsFromFile,
-  readProcCmdline,
-  resolveGlob,
-  resolvePath,
-  sessionStamp,
-} from "../lib/fs.ts";
-import { SqlpageEnv } from "../lib/governance.ts";
-import { startOrchestrator, stopByPid } from "../lib/orchestrate.ts";
+  killSpawnedStates,
+  materialize,
+  spawnedStates,
+} from "../lib/materialize.ts";
+
+import { cyan, dim, green, red, yellow } from "@std/fmt/colors";
 import {
-  formatKillResult,
-  formatKillSkipDead,
-  formatPidSkipSelf,
-  formatPidStatusLine,
-} from "../lib/text-ui.ts";
-import { deriveWatchRootsFromGlobs } from "../lib/watch.ts";
+  generateReverseProxyConfsFromSpawnedStates,
+} from "../lib/reverse-proxy-conf.ts";
 
-export function toSqlpageEnv(s: string): SqlpageEnv {
-  return s === "development" ? "development" : "production";
-}
+export async function lsSpawnedStates(
+  spawnStateHome: string,
+): Promise<void> {
+  for await (const state of spawnedStates(spawnStateHome)) {
+    const { pid, pidAlive, upstreamUrl, context } = state;
 
-type CliOptions = {
-  watch?: string[];
-  spawnedStatePath?: string;
+    const kind = context.service.kind;
+    const nature = context.supplier.nature;
 
-  // allowlist regex for inherited env var NAMES (repeatable)
-  // if not provided, spawned processes inherit all from yard.ts
-  env?: string[];
+    const statusIcon = pidAlive ? "🟢" : "🔴";
+    const pidLabel = pidAlive ? green(String(pid)) : red(`${pid} (dead)`);
 
-  spawnedCtxExec: string;
-  spawnedCtx?: string[];
-  sqlpageEnv: string;
-  sqlpageBin: string;
-  surveilrBin: string;
+    const kindLabel = cyan(kind);
+    const natureLabel = dim(nature);
 
-  reconcileMs: number;
-  listen: string;
+    const urlLabel = pidAlive ? yellow(upstreamUrl) : dim(upstreamUrl);
 
-  adoptForeignState: boolean;
-
-  webUiPort?: number;
-  webUiHost: string;
-
-  verbose: boolean;
-  killAllOnExit: boolean;
-};
-
-const defaultWatch = `./cargo.d/**/*.db`;
-const defaultSpawned = `./spawned.d`;
-
-async function listSessionDirs(spawnedStatePath: string): Promise<string[]> {
-  const out: string[] = [];
-  try {
-    for await (const e of Deno.readDir(spawnedStatePath)) {
-      if (!e.isDirectory) continue;
-      out.push(`${spawnedStatePath}/${e.name}`);
-    }
-  } catch {
-    // ignore
-  }
-  out.sort();
-  return out;
-}
-
-async function isOwnedSessionDir(sessionDir: string): Promise<boolean> {
-  // “owned by db-yard” heuristic: presence of the owner token file
-  const p = `${sessionDir}/.db-yard.owner-token`;
-  try {
-    const st = await Deno.stat(p);
-    return st.isFile;
-  } catch {
-    return false;
-  }
-}
-
-async function killAllOwnedSessions(args: {
-  spawnedStatePath: string;
-  verbose: boolean;
-}) {
-  const sessionDirs = await listSessionDirs(args.spawnedStatePath);
-  if (!sessionDirs.length) return;
-
-  const pidToSources = new Map<number, string[]>();
-
-  for (const sessionDir of sessionDirs) {
-    if (!(await isOwnedSessionDir(sessionDir))) continue;
-
-    const pidFile = `${sessionDir}/spawned-pids.txt`;
-    const pids = await readPidsFromFile(pidFile);
-    for (const pid of pids) {
-      const arr = pidToSources.get(pid) ?? [];
-      arr.push(pidFile);
-      pidToSources.set(pid, arr);
-    }
-  }
-
-  const uniquePids = [...pidToSources.keys()].sort((a, b) => a - b);
-  if (!uniquePids.length) return;
-
-  if (args.verbose) {
     console.log(
-      `[exit] kill-all-on-exit: killing ${uniquePids.length} PID(s) from owned sessions under ${args.spawnedStatePath}`,
+      `${statusIcon} [${pidLabel}] ${urlLabel} ` +
+        `${dim("(")}${kindLabel}${dim("/")}${natureLabel}${dim(")")}`,
     );
   }
-
-  for (const pid of uniquePids) {
-    if (pid === Deno.pid) continue;
-
-    const alive = isPidAlive(pid);
-    if (!alive) continue;
-
-    await stopByPid(pid);
-  }
 }
 
-if (import.meta.main) {
-  await new Command()
-    .name("yard.ts")
-    .description("File-driven process yard for SQLite DB cargo.")
-    .example(
-      "Watch all SQLite DBs under cargo.d (default behavior)",
-      "yard.ts",
-    )
-    .example(
-      "Watch with explicit glob (recommended)",
-      "yard.ts --watch './cargo.d/**/*.db'",
-    )
-    .example(
-      "Run with verbose colored output",
-      "yard.ts --watch './cargo.d/**/*.db' --verbose",
-    )
-    .example(
-      "Use a custom spawned state directory",
-      "yard.ts --watch './cargo.d/**/*.db' --spawned-state-path ./spawned.d",
-    )
-    .example(
-      "Enable admin server",
-      "yard.ts --admin-port 9090 --admin-host 127.0.0.1",
-    )
-    .option(
-      "--watch <glob:string>",
-      "Watch glob(s) (repeatable). Example: ./cargo.d/**/*.db",
-      { collect: true },
-    )
-    .option(
-      "--spawned-state-path <dir:string>",
-      "Directory for spawned state JSON files (a session subdir is created per run)",
-      { default: defaultSpawned },
-    )
-    .option(
-      "--env <re:string>",
-      "Allowlist env var name regex (repeatable). If set, only matching env vars are inherited by spawned processes.",
-      { collect: true },
-    )
-    .option(
-      "--spawned-ctx <sql:string>",
-      "Optional SQL query to run against DB; output stored in JSON (repeatable)",
-      { collect: true },
-    )
-    .option(
-      "--spawned-ctx-exec <exec:string>",
-      "SQLite CLI used to query DB configuration/context",
-      { default: "sqlite3" },
-    )
-    .option(
-      "--sqlpage-env <env:string>",
-      "SQLPAGE_ENVIRONMENT: production|development",
-      { default: "production" },
-    )
-    .option("--sqlpage-bin <path:string>", "sqlpage executable", {
-      default: "sqlpage",
-    })
-    .option("--surveilr-bin <path:string>", "surveilr executable", {
-      default: "surveilr",
-    })
-    .option(
-      "--reconcile-ms <ms:number>",
-      "Periodic reconciliation interval ms",
-      { default: 3000 },
-    )
-    .option("--listen <host:string>", "Listener host for spawned services", {
-      default: "127.0.0.1",
-    })
-    .option(
-      "--adopt-foreign-state",
-      "Adopt existing state owned by another yard token (unsafe)",
-      { default: false },
-    )
-    .option("--web-ui-port <port:number>", "Optional admin HTTP server port", {
-      required: false,
-    })
-    .option("--web-ui-host <host:string>", "Admin host (default: 127.0.0.1)", {
-      default: "127.0.0.1",
-    })
-    .option("--verbose", "Verbose pretty logging (color)", { default: false })
-    .option(
-      "--kill-all-on-exit",
-      "On exit, kill all spawned PIDs across all sessions that appear to be owned by db-yard",
-      { default: false },
-    )
-    .action(async (options: CliOptions) => {
-      const watchGlobs =
-        (options.watch?.length ? options.watch : [defaultWatch])
-          .map(resolveGlob);
+const verboseType = new EnumType(["essential", "comprehensive"] as const);
 
-      const watchRoots = await deriveWatchRootsFromGlobs(watchGlobs);
+const proxyType = new EnumType(["nginx", "traefik", "both"] as const);
 
-      const spawnedBase = resolvePath(
-        options.spawnedStatePath ?? defaultSpawned,
-      );
-      await ensureDir(spawnedBase);
+const cargoHome = "./cargo.d";
+const spawnStateHome = "./spawned.d";
 
-      const sessionDir = normalizeSlash(`${spawnedBase}/${sessionStamp()}`);
-      await ensureDir(sessionDir);
+await new Command()
+  .name("yard.ts")
+  .description("File-driven process yard for SQLite DB cargo.")
+  .example(
+    `Start all exposable databases in ${cargoHome}`,
+    "yard.ts start",
+  )
+  .example(
+    `Start with essential verbosity`,
+    "yard.ts start --verbose essential",
+  )
+  .example(
+    `Start with comprehensive verbosity`,
+    "yard.ts start --verbose comprehensive",
+  )
+  .example(
+    `List all managed processes in ${spawnStateHome}`,
+    "yard.ts ls",
+  )
+  .example(
+    `Stop (kill) all managed processes in ${spawnStateHome}`,
+    "yard.ts kill",
+  )
+  .example(
+    `Stop (kill) processes and remove ${spawnStateHome}`,
+    "yard.ts kill --clean",
+  )
+  .example(
+    `Write nginx bundle to ./out/nginx`,
+    "yard.ts proxy-conf --type nginx --nginx-out ./out/nginx",
+  )
+  .example(
+    `Write traefik bundle to ./out/traefik`,
+    "yard.ts proxy-conf --type traefik --traefik-out ./out/traefik",
+  )
+  .example(
+    `Write both nginx + traefik bundles`,
+    "yard.ts proxy-conf --type both --nginx-out ./out/nginx --traefik-out ./out/traefik",
+  )
+  .example(
+    `Emit nginx config to stdout (default)`,
+    "yard.ts proxy-conf --type nginx",
+  )
+  .command("start", `Start all exposable databases in ${cargoHome} and exit`)
+  .type("verbose", verboseType)
+  .option("--verbose <level:verbose>", "Spawn/materialize verbosity")
+  .option("--summarize", "Summarize after spawning")
+  .option("--no-ls", "Don't list after spawning")
+  .action(async ({ summarize, verbose, ls }) => {
+    const result = await materialize([{ path: cargoHome }], {
+      verbose: verbose ? verbose : false,
+      spawnStateHome,
+    });
 
-      const orch = await startOrchestrator({
-        watchGlobs,
-        watchRoots,
-        spawnedDir: sessionDir,
-        listenHost: parseListenHost(options.listen),
-        reconcileMs:
-          Number.isFinite(options.reconcileMs) && options.reconcileMs > 0
-            ? Math.floor(options.reconcileMs)
-            : 3000,
-        sqlpageEnv: toSqlpageEnv(options.sqlpageEnv),
-        sqlpageBin: options.sqlpageBin,
-        surveilrBin: options.surveilrBin,
-        spawnedCtxExec: options.spawnedCtxExec,
-        spawnedCtxSqls: options.spawnedCtx ?? [],
-        adoptForeignState: !!options.adoptForeignState,
-        inheritEnvRegex: options.env ?? [],
-        verbose: !!options.verbose,
+    if (summarize) {
+      console.log(`sessionHome: ${result.sessionHome}`);
+      console.log("summary:", result.summary);
+    }
+
+    if (ls) {
+      await lsSpawnedStates(spawnStateHome);
+    }
+  })
+  .command("ls", `List all managed processes in ${spawnStateHome}`)
+  .action(async () => {
+    await lsSpawnedStates(spawnStateHome);
+  })
+  .command(
+    "proxy-conf",
+    `NGINX, Traefik, etc. proxy configs from upstream URLs in ${spawnStateHome}`,
+  )
+  .type("proxy", proxyType)
+  .option("--type <type:proxy>", "Which config(s) to generate", {
+    default: "nginx",
+  })
+  .option("--nginx-out <dir:string>", "Write nginx confs into this dir")
+  .option("--traefik-out <dir:string>", "Write traefik confs into this dir")
+  .option("--include-dead", "Include dead PIDs when generating configs")
+  .option("--verbose", "Print where configs were written")
+  .option(
+    "--location-prefix <prefix:string>",
+    "Override proxy location prefix for ALL services (leading slash recommended)",
+  )
+  .option(
+    "--strip-prefix",
+    "Enable stripPrefix middleware/rewrite (default is off)",
+  )
+  .option(
+    "--server-name <name:string>",
+    "nginx: server_name value (default '_')",
+  )
+  .option("--listen <listen:string>", "nginx: listen value (default '80')")
+  .option(
+    "--entrypoints <csv:string>",
+    "traefik: entryPoints CSV (default 'web')",
+  )
+  .option(
+    "--rule <rule:string>",
+    "traefik: router rule override (default PathPrefix(`<prefix>/`))",
+  )
+  .option(
+    "--nginx-extra <text:string>",
+    "nginx: extra snippet appended into server block",
+  )
+  .option(
+    "--traefik-extra <text:string>",
+    "traefik: extra yaml appended at end",
+  )
+  .action(
+    async ({
+      type,
+      nginxOut,
+      traefikOut,
+      includeDead,
+      verbose,
+      locationPrefix,
+      stripPrefix,
+      serverName,
+      listen,
+      entrypoints,
+      rule,
+      nginxExtra,
+      traefikExtra,
+    }) => {
+      const wantNginx = type === "nginx" || type === "both";
+      const wantTraefik = type === "traefik" || type === "both";
+
+      const overrides = {
+        nginx: {
+          locationPrefix: locationPrefix,
+          serverName,
+          listen,
+          stripPrefix: stripPrefix ? true : undefined,
+          extra: nginxExtra,
+        },
+        traefik: {
+          locationPrefix: locationPrefix,
+          entrypoints,
+          rule,
+          stripPrefix: stripPrefix ? true : undefined,
+          extra: traefikExtra,
+        },
+      } as const;
+
+      await generateReverseProxyConfsFromSpawnedStates({
+        spawnStateHome,
+        nginxConfHome: wantNginx ? nginxOut : undefined,
+        traefikConfHome: wantTraefik ? traefikOut : undefined,
+        includeDead: includeDead ? true : undefined,
+        verbose: verbose ? true : undefined,
+        overrides,
       });
-
-      // bin/yard.ts (where you currently start the admin server, swap to web-ui server)
-      const webUiPort = options.webUiPort;
-      if (
-        typeof webUiPort === "number" && Number.isFinite(webUiPort) &&
-        webUiPort > 0
-      ) {
-        startWebUiServer({
-          webHost: parseListenHost(options.webUiHost || "127.0.0.1"),
-          webPort: Math.floor(webUiPort),
-          spawnedDir: sessionDir,
-          sqliteExec: options.spawnedCtxExec,
-          getRunning: () => [...orch.runningByDb.values()],
-        });
-      }
-
-      console.log(
-        `db-yard session started\n  state: ${sessionDir}\n  json:  ${sessionDir}/*.json\n  logs: ${sessionDir}/*.stdout.log, *.stderr.log`,
-      );
-
-      // bin/yard.ts (inside .action(...) after orch/start + optional web-ui start, before the final console.log)
-
-      const spawnedRootForExitKill = spawnedBase; // root containing session dirs
-
-      let exitKillRan = false;
-      const runExitKillOnce = async () => {
-        if (exitKillRan) return;
-        exitKillRan = true;
-
-        try {
-          orch.close();
-        } catch {
-          // ignore
-        }
-
-        if (options.killAllOnExit) {
-          await killAllOwnedSessions({
-            spawnedStatePath: spawnedRootForExitKill,
-            verbose: !!options.verbose,
-          });
-        }
-      };
-
-      // handle Ctrl+C / SIGTERM
-      try {
-        Deno.addSignalListener("SIGINT", () => {
-          runExitKillOnce().finally(() => Deno.exit(130));
-        });
-        Deno.addSignalListener("SIGTERM", () => {
-          runExitKillOnce().finally(() => Deno.exit(143));
-        });
-      } catch {
-        // signals may be unavailable on some platforms
-      }
-
-      // also run on normal unload (best-effort)
-      globalThis.addEventListener("unload", () => {
-        // no await allowed here; best-effort fire-and-forget
-        void runExitKillOnce();
-      });
-    })
-    .command("spawned", "Inspect (and optionally kill) spawned processes")
-    .example("List all managed processes across sessions", "yard.ts spawned")
-    .example(
-      "List processes from a specific spawned state directory",
-      "yard.ts spawned --spawned-state-path ./spawned.d",
-    )
-    .example(
-      "Kill all managed processes (dangerous)",
-      "yard.ts spawned --kill",
-    )
-    .option(
-      "--spawned-state-path <dir:string>",
-      "Root directory containing session dirs (each with spawned-pids.txt)",
-      { default: defaultSpawned },
-    )
-    .option(
-      "--kill",
-      "Kill all PIDs found across all session spawned-pids.txt files",
-      { default: false },
-    )
-    .action(async (options) => {
-      const spawnedStatePath = options.spawnedStatePath
-        ? normalizeSlash(Deno.realPathSync(options.spawnedStatePath))
-        : normalizeSlash(Deno.realPathSync(defaultSpawned));
-
-      const pidFiles = await listSpawnedPidFiles(spawnedStatePath);
-      if (!pidFiles.length) {
-        console.log(
-          `No session spawned-pids.txt files found under: ${spawnedStatePath}`,
-        );
-        return;
-      }
-
-      const pidToSources = new Map<number, string[]>();
-      for (const f of pidFiles) {
-        const pids = await readPidsFromFile(f);
-        for (const pid of pids) {
-          const arr = pidToSources.get(pid) ?? [];
-          arr.push(f);
-          pidToSources.set(pid, arr);
-        }
-      }
-
-      const uniquePids = [...pidToSources.keys()].sort((a, b) => a - b);
-      if (!uniquePids.length) {
-        console.log(`No PIDs found in: ${spawnedStatePath}`);
-        return;
-      }
-
-      const kill = !!options.kill;
-      if (kill) {
-        console.log(
-          `Killing ${uniquePids.length} PID(s) discovered under: ${spawnedStatePath}`,
-        );
-      } else {
-        console.log(
-          `Found ${uniquePids.length} unique PID(s) under: ${spawnedStatePath}`,
-        );
-      }
-
-      for (const pid of uniquePids) {
-        if (pid === Deno.pid) {
-          console.log(
-            formatPidSkipSelf({
-              pid,
-              sourcesCount: pidToSources.get(pid)?.length ?? 0,
-            }),
-          );
-          continue;
-        }
-
-        const alive = isPidAlive(pid);
-        const cmdline = await readProcCmdline(pid);
-
-        if (!kill) {
-          console.log(
-            formatPidStatusLine({
-              pid,
-              alive,
-              sourcesCount: pidToSources.get(pid)?.length ?? 0,
-              cmdline,
-            }),
-          );
-          continue;
-        }
-
-        if (!alive) {
-          console.log(formatKillSkipDead(pid));
-          continue;
-        }
-
-        await stopByPid(pid);
-        const after = isPidAlive(pid);
-        console.log(
-          formatKillResult({ pid, stillAlive: after, cmdline }),
-        );
-      }
-    })
-    .command("help", new HelpCommand())
-    .command("completions", new CompletionsCommand())
-    .parse(Deno.args);
-}
+    },
+  )
+  .command("kill", `Stop (kill) all managed processes in ${spawnStateHome}`)
+  .option("--clean", `Remove ${spawnStateHome} after killing processes`)
+  .action(async ({ clean }) => {
+    await killSpawnedStates(spawnStateHome);
+    if (clean) {
+      Deno.remove(spawnStateHome, { recursive: true }).catch(() => undefined);
+    } else {
+      await lsSpawnedStates(spawnStateHome);
+    }
+  })
+  .command("help", new HelpCommand())
+  .command("completions", new CompletionsCommand())
+  .parse(Deno.args);
