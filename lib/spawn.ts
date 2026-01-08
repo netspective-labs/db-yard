@@ -1,5 +1,9 @@
 // lib/spawn.ts
+import { ensureDir } from "@std/fs";
+import { dirname, relative } from "@std/path";
+
 import type { Path } from "./discover.ts";
+import { tabular, type TabularDataSupplier } from "./tabular.ts";
 import {
   exposable,
   type ExposableService,
@@ -8,13 +12,6 @@ import {
   type SpawnHost,
   type SpawnLogTarget,
 } from "./exposable.ts";
-import { ensureParentDir } from "./fs.ts";
-import {
-  defaultProxyEndpointPrefix,
-  joinUrl,
-  safeRelFromRoot,
-} from "./path.ts";
-import { tabular, type TabularDataSupplier } from "./tabular.ts";
 
 export type SpawnStateNature = "context" | "stdout" | "stderr";
 
@@ -29,74 +26,6 @@ export type SpawnSummary = Readonly<{
   errored: string[];
   errors: ReadonlyArray<Readonly<{ id: string; error: unknown }>>;
 }>;
-
-/* -------------------------- process / PID utilities ----------------------- */
-
-export function isPidAlive(pid: number): boolean {
-  try {
-    // On Unix, signal 0 checks existence/permission without sending a signal.
-    Deno.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export async function killPID(pid: number): Promise<void> {
-  // Platform-specific: on POSIX we try process-group kill first (negative pid).
-  const killGroup = () => {
-    try {
-      Deno.kill(-pid, "SIGTERM");
-      return true;
-    } catch {
-      return false;
-    }
-  };
-
-  const killSingle = (sig: Deno.Signal) => {
-    try {
-      Deno.kill(pid, sig);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-
-  const triedGroup = Deno.build.os !== "windows" ? killGroup() : false;
-  if (!triedGroup) {
-    if (!killSingle("SIGTERM")) return;
-  }
-
-  for (let i = 0; i < 20; i++) {
-    if (!isPidAlive(pid)) return;
-    await new Promise((r) => setTimeout(r, 100));
-  }
-
-  if (Deno.build.os !== "windows") {
-    try {
-      Deno.kill(-pid, "SIGKILL");
-      return;
-    } catch {
-      // fall back
-    }
-  }
-  killSingle("SIGKILL");
-}
-
-export async function readProcCmdline(
-  pid: number,
-): Promise<string | undefined> {
-  // Linux-only; return undefined elsewhere or if missing.
-  const path = `/proc/${pid}/cmdline`;
-  try {
-    const bytes = await Deno.readFile(path);
-    const raw = new TextDecoder().decode(bytes);
-    const cleaned = raw.replaceAll("\u0000", " ").trim();
-    return cleaned.length ? cleaned : undefined;
-  } catch {
-    return undefined;
-  }
-}
 
 /* -------------------------------- events -------------------------------- */
 
@@ -260,25 +189,11 @@ export type SpawnOptions = Readonly<{
   sqlpageEnv?: string;
   surveilrBin?: string;
 
-  /**
-   * Optional event listener for progress / telemetry.
-   */
   onEvent?: SpawnEventListener;
-
-  /**
-   * Optional session id, otherwise UUID.
-   */
   sessionId?: string;
 
-  /**
-   * Optional reachability probe. Default is disabled.
-   */
   probe?: ReachabilityProbe;
 
-  /**
-   * Optional log targets to pass as defaults when spawnStatePath() returns undefined.
-   * If omitted, and spawnStatePath() returns undefined, output is silenced.
-   */
   defaultStdoutLogPath?: SpawnLogTarget;
   defaultStderrLogPath?: SpawnLogTarget;
 }>;
@@ -322,6 +237,72 @@ export type SpawnedContext = Readonly<{
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K>
   : never;
+
+/* --------------------------- pid/process helpers -------------------------- */
+
+export function isPidAlive(pid: number): boolean {
+  try {
+    Deno.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function readProcCmdline(
+  pid: number,
+): Promise<string | undefined> {
+  // Linux-only; return undefined elsewhere or if missing.
+  const path = `/proc/${pid}/cmdline`;
+  try {
+    const bytes = await Deno.readFile(path);
+    const raw = new TextDecoder().decode(bytes);
+    const cleaned = raw.replaceAll("\u0000", " ").trim();
+    return cleaned.length ? cleaned : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function killPID(pid: number): Promise<void> {
+  const killGroup = () => {
+    try {
+      Deno.kill(-pid, "SIGTERM");
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const killSingle = (sig: Deno.Signal) => {
+    try {
+      Deno.kill(pid, sig);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const triedGroup = Deno.build.os !== "windows" ? killGroup() : false;
+  if (!triedGroup) {
+    if (!killSingle("SIGTERM")) return;
+  }
+
+  for (let i = 0; i < 20; i++) {
+    if (!isPidAlive(pid)) return;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+
+  if (Deno.build.os !== "windows") {
+    try {
+      Deno.kill(-pid, "SIGKILL");
+      return;
+    } catch {
+      // fall back
+    }
+  }
+  killSingle("SIGKILL");
+}
 
 /* --------------------------------- api ---------------------------------- */
 
@@ -520,11 +501,7 @@ export async function* spawn(
             ctxPath,
             JSON.stringify(ctx, null, 2) + "\n",
           );
-          await emit({
-            type: "context_written",
-            serviceId: id,
-            path: ctxPath,
-          });
+          await emit({ type: "context_written", serviceId: id, path: ctxPath });
         } catch (error) {
           await emit({
             type: "error",
@@ -590,21 +567,52 @@ export async function* spawn(
 
   const summary: SpawnSummary = { spawned, skipped, errored, errors };
   await emit({ type: "complete", summary });
-  await emit({
-    type: "session_end",
-    summary,
-    totalMs: performance.now() - t0,
-  });
+  await emit({ type: "session_end", summary, totalMs: performance.now() - t0 });
 
   return summary;
 }
 
 /* -------------------------------- helpers -------------------------------- */
 
+async function ensureParentDir(filePath: string): Promise<void> {
+  const dir = dirname(filePath);
+  if (dir && dir !== "." && dir !== "/") await ensureDir(dir);
+}
+
+function safeRelFromRoot(root: string | undefined, filePath: string): string {
+  try {
+    if (!root || root.trim().length === 0) return filePath;
+    const rel = relative(root, filePath);
+    if (rel.startsWith("..") || rel === "") return filePath;
+    return rel;
+  } catch {
+    return filePath;
+  }
+}
+
 function stripTrailingExt(p: string): string {
   const i = p.lastIndexOf(".");
   if (i <= 0) return p;
   return p.slice(0, i);
+}
+
+function defaultProxyEndpointPrefix(kind: string, relNoExt: string): string {
+  const norm = relNoExt.replaceAll("\\", "/").replaceAll(/\/+/g, "/").trim();
+  const clean = norm.length === 0 ? kind : norm;
+  return `/apps/${kind}/${clean}`.replaceAll(/\/+/g, "/");
+}
+
+function normalizePathForUrl(path: string): string {
+  const p = path.replaceAll("\\", "/").trim();
+  if (!p) return "/";
+  if (!p.startsWith("/")) return `/${p}`;
+  return p;
+}
+
+function joinUrl(baseUrl: string, path: string): string {
+  const b = baseUrl.replace(/\/+$/, "");
+  const p = normalizePathForUrl(path);
+  return `${b}${p}`;
 }
 
 function buildProbeUrl(

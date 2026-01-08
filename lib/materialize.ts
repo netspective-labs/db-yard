@@ -1,15 +1,9 @@
 // lib/materialize.ts
 import { ensureDir } from "@std/fs";
-import { basename, join, resolve } from "@std/path";
+import { resolve } from "@std/path";
 import type { Path } from "./discover.ts";
 import { encounters, fileSystemSource } from "./discover.ts";
 import type { ExposableService } from "./exposable.ts";
-import {
-  joinUrl,
-  proxyPrefixFromRel,
-  relDirFromRoots,
-  relFromRoots,
-} from "./path.ts";
 import { richTextUISpawnEvents } from "./spawn-event.ts";
 import {
   isPidAlive,
@@ -17,9 +11,11 @@ import {
   readProcCmdline,
   spawn,
   type SpawnedContext,
-  SpawnEventListener,
+  type SpawnEventListener,
   type SpawnSummary,
 } from "./spawn.ts";
+import { createSpawnSessionHome, resolveRootsAbs } from "./session.ts";
+import { joinUrl } from "./path.ts";
 
 export type MaterializeVerbose = false | "essential" | "comprehensive";
 
@@ -34,34 +30,18 @@ export type MaterializeResult = Readonly<{
   spawned: SpawnedContext[];
 }>;
 
-function fmt2(n: number): string {
-  return String(n).padStart(2, "0");
-}
-
-function sessionStamp(d = new Date()): string {
-  const yyyy = d.getFullYear();
-  const mm = fmt2(d.getMonth() + 1);
-  const dd = fmt2(d.getDate());
-  const hh = fmt2(d.getHours());
-  const mi = fmt2(d.getMinutes());
-  const ss = fmt2(d.getSeconds());
-  return `${yyyy}-${mm}-${dd}-${hh}-${mi}-${ss}`;
-}
-
 export async function materialize(
   srcPaths: Iterable<Path>,
   opts: MaterializeOptions,
 ): Promise<MaterializeResult> {
   const src = Array.from(srcPaths);
 
-  // Canonicalize roots so prefix checks work even with symlinks.
-  const rootsAbs = src.map((p) => Deno.realPathSync(resolve(p.path)));
+  const rootsAbs = resolveRootsAbs(src);
 
   const spawnStateHome = resolve(opts.spawnStateHome);
   await ensureDir(spawnStateHome);
 
-  const sessionHome = join(spawnStateHome, sessionStamp());
-  await ensureDir(sessionHome);
+  const session = await createSpawnSessionHome(spawnStateHome);
 
   const onEvent: SpawnEventListener | undefined = opts.verbose === false
     ? undefined
@@ -69,30 +49,22 @@ export async function materialize(
 
   const spawned: SpawnedContext[] = [];
 
+  const { spawnStatePathForEntry } = await import("./session.ts");
   const spawnStatePath = (
     entry: ExposableService,
     nature: "context" | "stdout" | "stderr",
-  ): string | undefined => {
-    // Canonicalize discovered file too.
-    const fileAbs = Deno.realPathSync(resolve(entry.supplier.location));
+  ): string | undefined =>
+    spawnStatePathForEntry(entry, nature, {
+      sessionHome: session.sessionHome,
+      rootsAbs,
+    });
 
-    const relFromRoot = relFromRoots(fileAbs, rootsAbs);
-    const relDir = relDirFromRoots(fileAbs, rootsAbs);
-
-    const outDir = relDir ? join(sessionHome, relDir) : sessionHome;
-    const fileName = basename(relFromRoot);
-
-    if (nature === "context") return join(outDir, `${fileName}.context.json`);
-    if (nature === "stdout") return join(outDir, `${fileName}.stdout.log`);
-    if (nature === "stderr") return join(outDir, `${fileName}.stderr.log`);
-    return undefined;
-  };
-
+  const { relFromRoots } = await import("./session.ts");
+  const { proxyPrefixFromRel } = await import("./path.ts");
   const expose = (entry: ExposableService, _candidate: string) => {
     const fileAbs = Deno.realPathSync(resolve(entry.supplier.location));
     const relFromRoot = relFromRoots(fileAbs, rootsAbs);
     const proxyEndpointPrefix = proxyPrefixFromRel(relFromRoot);
-
     return { proxyEndpointPrefix, exposableServiceConf: {} } as const;
   };
 
@@ -105,7 +77,7 @@ export async function materialize(
     const next = await gen.next();
     if (next.done) {
       return {
-        sessionHome,
+        sessionHome: session.sessionHome,
         summary: next.value as SpawnSummary,
         spawned,
       };
@@ -123,9 +95,9 @@ export type SpawnedStateEncounter = Readonly<{
   upstreamUrl: string;
 }>;
 
-export async function* spawnedStates(spawnStateHome: string) {
+export async function* spawnedStates(spawnStateHomeOrSessionHome: string) {
   const gen = encounters(
-    [{ path: spawnStateHome, globs: ["**/*.json"] }],
+    [{ path: spawnStateHomeOrSessionHome, globs: ["**/*.json"] }],
     fileSystemSource({}, (e) => Deno.readTextFile(e.path)),
     async ({ entry, content }) => {
       const filePath = entry.path;
@@ -167,11 +139,11 @@ export async function* spawnedStates(spawnStateHome: string) {
   }
 }
 
-export async function killSpawnedStates(spawnStateHome: string): Promise<void> {
-  for await (const state of spawnedStates(spawnStateHome)) {
+export async function killSpawnedStates(
+  spawnStateHomeOrSessionHome: string,
+): Promise<void> {
+  for await (const state of spawnedStates(spawnStateHomeOrSessionHome)) {
     const { pid, pidAlive } = state;
-    if (pidAlive) {
-      await killPID(pid);
-    }
+    if (pidAlive) await killPID(pid);
   }
 }

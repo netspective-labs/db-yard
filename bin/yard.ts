@@ -9,17 +9,15 @@ import {
   materialize,
   spawnedStates,
 } from "../lib/materialize.ts";
-import {
-  generateReverseProxyConfsFromSpawnedStates,
-} from "../lib/reverse-proxy-conf.ts";
-import { startWebUiServer } from "../lib/serve/web-ui.ts";
+import { generateReverseProxyConfsFromSpawnedStates } from "../lib/reverse-proxy-conf.ts";
 import { type WatchEvent, watchYard } from "../lib/serve/watch.ts";
+import { startWebUiServer } from "../lib/serve/web-ui.ts";
 import { richTextUISpawnEvents } from "../lib/spawn-event.ts";
 
 export async function lsSpawnedStates(
-  spawnStateHome: string,
+  spawnStateHomeOrSessionHome: string,
 ): Promise<void> {
-  for await (const state of spawnedStates(spawnStateHome)) {
+  for await (const state of spawnedStates(spawnStateHomeOrSessionHome)) {
     const { pid, pidAlive, upstreamUrl, context } = state;
 
     const kind = context.service.kind;
@@ -34,8 +32,9 @@ export async function lsSpawnedStates(
     const urlLabel = pidAlive ? yellow(upstreamUrl) : dim(upstreamUrl);
 
     console.log(
-      `${statusIcon} [${pidLabel}] ${urlLabel} ` +
-        `${dim("(")}${kindLabel}${dim("/")}${natureLabel}${dim(")")}`,
+      `${statusIcon} [${pidLabel}] ${urlLabel} ${dim("(")}${kindLabel}${
+        dim("/")
+      }${natureLabel}${dim(")")}`,
     );
   }
 }
@@ -43,15 +42,14 @@ export async function lsSpawnedStates(
 const verboseType = new EnumType(["essential", "comprehensive"] as const);
 const proxyType = new EnumType(["nginx", "traefik", "both"] as const);
 
-// Defaults (overridable per command)
 const defaultCargoHome = "./cargo.d";
 const defaultSpawnStateHome = "./spawned.d";
 
 function printWatchEvent(e: WatchEvent) {
   if (e.type === "watch_start") {
     console.log(
-      `${green("watch")} roots=${dim(e.roots.join(", "))} active=${
-        dim(e.activeDir)
+      `${green("watch")} roots=${dim(e.roots.join(", "))} session=${
+        dim(e.sessionHome)
       }`,
     );
     return;
@@ -66,11 +64,11 @@ function printWatchEvent(e: WatchEvent) {
   }
   if (e.type === "reconcile_end") {
     console.log(
-      `${yellow("reconcile")} end ${dim(`(${e.reason})`)} ` +
-        `discovered=${e.discovered} ledger=${e.ledger} ` +
-        `killed=${e.killed} spawned=${e.spawned} ${
-          dim(`${Math.round(e.durationMs)}ms`)
-        }`,
+      `${yellow("reconcile")} end ${
+        dim(`(${e.reason})`)
+      } discovered=${e.discovered} ledger=${e.ledger} killed=${e.killed} spawned=${e.spawned} ${
+        dim(`${Math.round(e.durationMs)}ms`)
+      }`,
     );
     return;
   }
@@ -113,10 +111,7 @@ await new Command()
     `Continuously watch ${defaultCargoHome} and keep services in sync`,
     "yard.ts watch",
   )
-  .example(
-    `Run Web UI + reverse proxy (serves UI at /.web-ui/)`,
-    "yard.ts web-ui --web-port 8080",
-  )
+  .example(`Start web UI + watcher`, "yard.ts web-ui --watch")
   .command(
     "start",
     `Start exposable databases (default root ${defaultCargoHome}) and exit`,
@@ -152,7 +147,7 @@ await new Command()
   })
   .command(
     "watch [roots...:string]",
-    `Watch roots (default ${defaultCargoHome}) and keep services in sync (ledger in spawn-state-home/active)`,
+    `Watch roots (default ${defaultCargoHome}) and keep services in sync (session stamped under spawn-state-home)`,
   )
   .type("verbose", verboseType)
   .option(
@@ -164,11 +159,6 @@ await new Command()
     "--spawn-state-home <dir:string>",
     `Spawn state home (default ${defaultSpawnStateHome})`,
     { default: defaultSpawnStateHome },
-  )
-  .option(
-    "--active-dir-name <name:string>",
-    "Stable active session dir name (default 'active')",
-    { default: "active" },
   )
   .option(
     "--debounce-ms <ms:number>",
@@ -194,32 +184,25 @@ await new Command()
   )
   .option("--surveilr-bin <bin:string>", "surveilr binary (default 'surveilr')")
   .action(async (o, ...roots: string[]) => {
-    const srcRoots: string[] = (roots.length > 0) ? roots : [o.cargoHome];
+    const srcRoots: string[] = roots.length > 0 ? roots : [o.cargoHome];
 
     const ac = new AbortController();
     const stop = () => {
       try {
         ac.abort();
-      } catch {
-        // ignore
-      }
+      } catch { /* ignore */ }
     };
 
     try {
       Deno.addSignalListener("SIGINT", stop);
-    } catch {
-      // ignore
-    }
+    } catch { /* ignore */ }
     try {
       Deno.addSignalListener("SIGTERM", stop);
-    } catch {
-      // ignore
-    }
+    } catch { /* ignore */ }
 
     const onWatchEvent = o.watchVerbose
       ? (e: WatchEvent) => printWatchEvent(e)
       : undefined;
-
     const onSpawnEvent = o.spawnEvents
       ? richTextUISpawnEvents(o.spawnEvents)
       : undefined;
@@ -227,7 +210,6 @@ await new Command()
     try {
       await watchYard(srcRoots.map((p: string) => ({ path: p })), {
         spawnStateHome: o.spawnStateHome,
-        activeDirName: o.activeDirName,
         debounceMs: o.debounceMs,
         reconcileEveryMs: o.reconcileEveryMs > 0
           ? o.reconcileEveryMs
@@ -246,19 +228,15 @@ await new Command()
     } finally {
       try {
         Deno.removeSignalListener("SIGINT", stop);
-      } catch {
-        // ignore
-      }
+      } catch { /* ignore */ }
       try {
         Deno.removeSignalListener("SIGTERM", stop);
-      } catch {
-        // ignore
-      }
+      } catch { /* ignore */ }
     }
   })
   .command(
     "web-ui [roots...:string]",
-    `Run Web UI + reverse proxy (UI served at /.web-ui/) and keep yard in sync`,
+    "Start web UI (optionally with watcher) on one port",
   )
   .type("verbose", verboseType)
   .option(
@@ -271,19 +249,22 @@ await new Command()
     `Spawn state home (default ${defaultSpawnStateHome})`,
     { default: defaultSpawnStateHome },
   )
-  .option(
-    "--active-dir-name <name:string>",
-    "Stable active session dir name (default 'active')",
-    { default: "active" },
-  )
-  .option(
-    "--debounce-ms <ms:number>",
-    "Debounce filesystem events before reconciling (default 250)",
-    { default: 250 },
-  )
+  .option("--web-host <host:string>", "Web host (default 127.0.0.1)", {
+    default: "127.0.0.1",
+  })
+  .option("--web-port <port:number>", "Web port (default 8080)", {
+    default: 8080,
+  })
+  .option("--sqlite-exec <path:string>", "sqlite3 binary (default 'sqlite3')", {
+    default: "sqlite3",
+  })
+  .option("--watch", "Run watcher in same process/session as web UI")
+  .option("--debounce-ms <ms:number>", "Watcher debounce (default 250)", {
+    default: 250,
+  })
   .option(
     "--reconcile-every-ms <ms:number>",
-    "Optional periodic full reconcile (0 disables)",
+    "Watcher periodic reconcile (0 disables)",
     { default: 0 },
   )
   .option("--watch-verbose", "Print high-level watch events to stdout")
@@ -293,126 +274,84 @@ await new Command()
   )
   .option(
     "--listen-host <host:string>",
-    "Listen host for spawned services (default 127.0.0.1)",
+    "Service listen host (default 127.0.0.1)",
   )
-  .option(
-    "--port-start <port:number>",
-    "Starting port for spawned services (default 3000)",
-  )
+  .option("--port-start <port:number>", "Service starting port (default 3000)")
   .option("--sqlpage-bin <bin:string>", "sqlpage binary (default 'sqlpage')")
   .option(
     "--sqlpage-env <env:string>",
     "SQLPAGE_ENVIRONMENT value (default 'development')",
   )
   .option("--surveilr-bin <bin:string>", "surveilr binary (default 'surveilr')")
-  .option("--web-host <host:string>", "Web UI host (default 127.0.0.1)", {
-    default: "127.0.0.1",
-  })
-  .option("--web-port <port:number>", "Web UI port (default 8080)", {
-    default: 8080,
-  })
   .action(async (o, ...roots: string[]) => {
-    const srcRoots: string[] = (roots.length > 0) ? roots : [o.cargoHome];
+    const srcRoots: string[] = roots.length > 0 ? roots : [o.cargoHome];
 
     const ac = new AbortController();
     const stop = () => {
       try {
         ac.abort();
-      } catch {
-        // ignore
-      }
+      } catch { /* ignore */ }
     };
 
     try {
       Deno.addSignalListener("SIGINT", stop);
-    } catch {
-      // ignore
-    }
+    } catch { /* ignore */ }
     try {
       Deno.addSignalListener("SIGTERM", stop);
-    } catch {
-      // ignore
-    }
+    } catch { /* ignore */ }
 
     const onWatchEvent = o.watchVerbose
       ? (e: WatchEvent) => printWatchEvent(e)
       : undefined;
-
     const onSpawnEvent = o.spawnEvents
       ? richTextUISpawnEvents(o.spawnEvents)
       : undefined;
 
-    const server = startWebUiServer({
+    const server = await startWebUiServer({
       webHost: o.webHost,
       webPort: o.webPort,
-      srcPaths: srcRoots.map((p: string) => ({ path: p })),
       spawnStateHome: o.spawnStateHome,
-      activeDirName: o.activeDirName,
-      debounceMs: o.debounceMs,
-      reconcileEveryMs: o.reconcileEveryMs > 0 ? o.reconcileEveryMs : undefined,
-      spawn: {
-        listenHost: o.listenHost,
-        portStart: o.portStart,
-        sqlpageBin: o.sqlpageBin,
-        sqlpageEnv: o.sqlpageEnv,
-        surveilrBin: o.surveilrBin,
+      srcRoots,
+      sqliteExec: o.sqliteExec,
+      watch: o.watch ? true : false,
+      onWatchEvent,
+      watchOptions: {
+        debounceMs: o.debounceMs,
+        reconcileEveryMs: o.reconcileEveryMs > 0
+          ? o.reconcileEveryMs
+          : undefined,
+        onSpawnEvent,
+        spawn: {
+          listenHost: o.listenHost,
+          portStart: o.portStart,
+          sqlpageBin: o.sqlpageBin,
+          sqlpageEnv: o.sqlpageEnv,
+          surveilrBin: o.surveilrBin,
+        },
       },
     });
 
-    if (onWatchEvent || onSpawnEvent) {
-      // startWebUiServer currently captures watch events internally; if you want
-      // console output too, run a parallel watch with the same signal.
-      // This avoids duplicating watch logic or modifying the server.
-      const extraWatch = (async () => {
-        if (!onWatchEvent && !onSpawnEvent) return;
-        await watchYard(srcRoots.map((p: string) => ({ path: p })), {
-          spawnStateHome: o.spawnStateHome,
-          activeDirName: o.activeDirName,
-          debounceMs: o.debounceMs,
-          reconcileEveryMs: o.reconcileEveryMs > 0
-            ? o.reconcileEveryMs
-            : undefined,
-          signal: ac.signal,
-          onWatchEvent,
-          onSpawnEvent,
-          spawn: {
-            listenHost: o.listenHost,
-            portStart: o.portStart,
-            sqlpageBin: o.sqlpageBin,
-            sqlpageEnv: o.sqlpageEnv,
-            surveilrBin: o.surveilrBin,
-          },
-        });
-      })().catch(() => undefined);
-
-      void extraWatch;
-    }
-
     console.log(
-      `${green("web-ui")} http://${o.webHost}:${o.webPort}/.web-ui/  ${
-        dim(
-          "(admin: /.admin)",
-        )
-      }`,
+      `web ui: http://${o.webHost}:${o.webPort}/  (assets: /.web-ui)`,
     );
+    console.log(`sessionHome: ${server.sessionHome}`);
 
-    // Block until aborted
-    while (!ac.signal.aborted) {
-      await new Promise((r) => setTimeout(r, 250));
-    }
+    // Keep process alive until aborted.
+    await new Promise<void>((resolve) => {
+      if (ac.signal.aborted) resolve();
+      else ac.signal.addEventListener("abort", () => resolve(), { once: true });
+    });
 
-    server.close();
+    try {
+      server.close();
+    } catch { /* ignore */ }
 
     try {
       Deno.removeSignalListener("SIGINT", stop);
-    } catch {
-      // ignore
-    }
+    } catch { /* ignore */ }
     try {
       Deno.removeSignalListener("SIGTERM", stop);
-    } catch {
-      // ignore
-    }
+    } catch { /* ignore */ }
   })
   .command("ls", `List managed processes (default ${defaultSpawnStateHome})`)
   .option(

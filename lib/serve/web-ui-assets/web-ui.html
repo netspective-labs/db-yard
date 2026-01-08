@@ -1,47 +1,31 @@
-<!-- lib/serve/web-ui-assets/web-ui.html -->
+<!-- lib/serve/web-ui.html -->
 <!DOCTYPE html>
 <html>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>db-yard</title>
+    <title>yard web ui</title>
     <link rel="stylesheet" href="/.web-ui/web-ui.css" />
   </head>
 
   <body>
-    <header>
-      <div class="title">db-yard</div>
-      <div class="sub">
-        <a href="/.admin" target="_blank">/.admin</a>
-        <span class="sep">•</span>
-        <a href="/.admin/files" target="_blank">/.admin/files</a>
-      </div>
-    </header>
+    <div class="hdr">yard web ui</div>
 
-    <main>
-      <section class="card">
-        <div class="card-h">Running services</div>
-        <div id="status" class="muted">Loading…</div>
+    <div class="rowlinks">
+      <a href="/">Proxy index</a>
+      <a href="/.admin">/.admin (json)</a>
+      <a href="/.admin/index.html">/.admin/index.html</a>
+    </div>
 
-        <div class="grid" id="runningGrid">
-          <div class="row head">
-            <div class="c c-prefix">proxy prefix</div>
-            <div class="c c-up">upstream</div>
-            <div class="c c-kind">kind</div>
-            <div class="c c-id">id</div>
-            <div class="c c-pid">pid</div>
-          </div>
-          <div class="row">
-            <div class="c muted">Loading…</div>
-          </div>
-        </div>
-      </section>
+    <div class="section">
+      <div class="hdr2">Runtime</div>
+      <pre id="runtime" class="pre muted">loading...</pre>
+    </div>
 
-      <section class="card">
-        <div class="card-h">Recent watcher events</div>
-        <pre id="events" class="events">(loading)</pre>
-      </section>
-    </main>
+    <div class="section">
+      <div class="hdr2">Services</div>
+      <div id="services" class="grid"></div>
+    </div>
 
     <script src="/.web-ui/web-ui.js"></script>
   </body>

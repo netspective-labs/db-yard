@@ -1,104 +1,100 @@
 // lib/fs.ts
 import { ensureDir } from "@std/fs";
-import { dirname, join } from "@std/path";
+import { dirname, resolve } from "@std/path";
+import { encounters, fileSystemSource } from "./discover.ts";
+import { normalizeSlash } from "./path.ts";
 
 export async function ensureParentDir(filePath: string): Promise<void> {
   const dir = dirname(filePath);
   if (dir && dir !== "." && dir !== "/") await ensureDir(dir);
 }
 
-export function isSafeRelativeSubpath(rel: string): boolean {
-  const s = String(rel ?? "").replaceAll("\\", "/").replace(/^\/+/, "");
-  if (!s) return false;
-  if (s.includes("\0")) return false;
-  const parts = s.split("/").filter((x) => x.length > 0);
-  if (!parts.length) return false;
-  for (const part of parts) {
-    if (part === "." || part === "..") return false;
-  }
-  return true;
-}
-
 export type ListedFile = Readonly<{
-  name: string; // relative to root, may include subdirs
+  name: string; // relative to root
+  absPath: string;
   size: number;
   mtimeMs: number;
+  kind: "json" | "log" | "other";
 }>;
 
-export async function listFilesRecursive(
-  rootDir: string,
-  opts?: Readonly<{
-    hideNames?: ReadonlyArray<string>;
-    hidePrefixes?: ReadonlyArray<string>;
-    hideSuffixes?: ReadonlyArray<string>;
+export async function listFilesRecursiveViaEncounters(
+  args: Readonly<{
+    rootDir: string;
+    globs?: readonly string[];
+    hide?: (rel: string) => boolean;
   }>,
 ): Promise<ListedFile[]> {
-  const root = String(rootDir ?? "").replaceAll("\\", "/").replace(/\/+$/, "");
+  const root = resolve(args.rootDir);
+  const globs = args.globs ?? ["**/*"];
+
   const out: ListedFile[] = [];
 
-  const hideNames = new Set(opts?.hideNames ?? []);
-  const hidePrefixes = opts?.hidePrefixes ?? [];
-  const hideSuffixes = opts?.hideSuffixes ?? [];
+  const gen = encounters(
+    [{ path: root, globs: [...globs] }],
+    fileSystemSource({}, (e) => {
+      // We don’t need content for listing, but encounters wants a supplier.
+      // Keep it cheap: stat is done below.
+      return e.path;
+    }),
+    async ({ entry }) => {
+      const abs = resolve(entry.path);
+      const rel = normalizeSlash(abs).startsWith(normalizeSlash(root) + "/")
+        ? normalizeSlash(abs).slice(normalizeSlash(root).length + 1)
+        : normalizeSlash(abs);
 
-  const shouldHide = (name: string) => {
-    if (hideNames.has(name)) return true;
-    for (const p of hidePrefixes) if (name.startsWith(p)) return true;
-    for (const s of hideSuffixes) if (name.endsWith(s)) return true;
-    return false;
-  };
-
-  async function walk(dirAbs: string, relDir: string) {
-    let it: AsyncIterable<Deno.DirEntry>;
-    try {
-      it = Deno.readDir(dirAbs);
-    } catch {
-      return;
-    }
-
-    for await (const e of it) {
-      const abs = join(dirAbs, e.name);
-      const rel = relDir ? `${relDir}/${e.name}` : e.name;
-      const name = rel.replaceAll("\\", "/");
-
-      if (shouldHide(name) || shouldHide(e.name)) continue;
-
-      if (e.isDirectory) {
-        await walk(abs, name);
-        continue;
-      }
-      if (!e.isFile) continue;
+      if (args.hide && args.hide(rel)) return null;
 
       let st: Deno.FileInfo;
       try {
         st = await Deno.stat(abs);
       } catch {
-        continue;
+        return null;
       }
+      if (!st.isFile) return null;
+
+      const kind = rel.endsWith(".json")
+        ? "json"
+        : (rel.endsWith(".stdout.log") || rel.endsWith(".stderr.log")
+          ? "log"
+          : "other");
 
       out.push({
-        name,
+        name: rel,
+        absPath: abs,
         size: st.size,
         mtimeMs: st.mtime?.getTime() ?? 0,
+        kind,
       });
-    }
+
+      return null;
+    },
+  );
+
+  while (true) {
+    const next = await gen.next();
+    if (next.done) break;
   }
 
-  await walk(root, "");
   out.sort((a, b) => a.name.localeCompare(b.name));
   return out;
 }
 
-export function contentTypeByName(name: string): string {
-  const n = String(name ?? "").toLowerCase();
-  if (n.endsWith(".json")) return "application/json; charset=utf-8";
-  if (n.endsWith(".html") || n.endsWith(".htm")) {
-    return "text/html; charset=utf-8";
+export function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return "-";
+  if (n < 1024) return `${n} B`;
+  const kb = n / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(1)} MB`;
+  const gb = mb / 1024;
+  return `${gb.toFixed(1)} GB`;
+}
+
+export function formatWhen(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "-";
+  try {
+    return new Date(ms).toISOString();
+  } catch {
+    return "-";
   }
-  if (n.endsWith(".css")) return "text/css; charset=utf-8";
-  if (n.endsWith(".js")) return "application/javascript; charset=utf-8";
-  if (n.endsWith(".log") || n.endsWith(".txt")) {
-    return "text/plain; charset=utf-8";
-  }
-  if (n.endsWith(".svg")) return "image/svg+xml";
-  return "application/octet-stream";
 }

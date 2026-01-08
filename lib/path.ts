@@ -1,8 +1,8 @@
 // lib/path.ts
-import { basename, dirname, extname, relative } from "@std/path";
+import { basename, extname, relative } from "@std/path";
 
 export function normalizeSlash(p: string): string {
-  return String(p ?? "").replaceAll("\\", "/").replaceAll(/\/+/g, "/");
+  return p.replaceAll("\\", "/").replaceAll(/\/+/g, "/");
 }
 
 export function stripOneExt(p: string): string {
@@ -11,7 +11,7 @@ export function stripOneExt(p: string): string {
 }
 
 export function normalizePathForUrl(path: string): string {
-  const p = normalizeSlash(path).trim();
+  const p = normalizeSlash(String(path ?? "")).trim();
   if (!p) return "/";
   if (!p.startsWith("/")) return `/${p}`;
   return p;
@@ -23,29 +23,36 @@ export function joinUrl(baseUrl: string, path: string): string {
   return `${b}${p}`;
 }
 
-export function safeRelFromRoot(
-  root: string | undefined,
-  filePath: string,
-): string {
-  try {
-    if (!root || root.trim().length === 0) return filePath;
-    const rel0 = relative(root, filePath);
-    if (rel0.startsWith("..") || rel0 === "") return filePath;
-    return normalizeSlash(rel0).replaceAll(/^\.\//g, "");
-  } catch {
-    return filePath;
+export function isSafeRelativeSubpath(rel: string): boolean {
+  const s = normalizeSlash(String(rel ?? "")).replace(/^\/+/, "");
+  if (!s) return false;
+  if (s.includes("\0")) return false;
+  const parts = s.split("/").filter((x) => x.length > 0);
+  if (!parts.length) return false;
+  for (const part of parts) {
+    if (part === "." || part === "..") return false;
   }
+  return true;
 }
 
-export function defaultProxyEndpointPrefix(
-  kind: string,
-  relNoExt: string,
-): string {
-  const norm = normalizeSlash(relNoExt).replaceAll(/^\.\//g, "").trim();
-  const clean = norm.length === 0 ? kind : norm;
-  return `/apps/${kind}/${clean}`.replaceAll(/\/+/g, "/");
+export function contentTypeByName(name: string): string {
+  const n = String(name ?? "").toLowerCase();
+  if (n.endsWith(".json")) return "application/json; charset=utf-8";
+  if (n.endsWith(".html") || n.endsWith(".htm")) {
+    return "text/html; charset=utf-8";
+  }
+  if (n.endsWith(".css")) return "text/css; charset=utf-8";
+  if (n.endsWith(".js")) return "text/javascript; charset=utf-8";
+  if (n.endsWith(".log") || n.endsWith(".txt")) {
+    return "text/plain; charset=utf-8";
+  }
+  return "application/octet-stream";
 }
 
+/**
+ * materialize/watch/web-ui canonical proxy prefix:
+ * derived from the discovered DB path relative to its best root.
+ */
 export function proxyPrefixFromRel(relFromRoot: string): string {
   const relNoExt = stripOneExt(relFromRoot);
   const clean = normalizeSlash(relNoExt).replaceAll(/^\.\//g, "").trim();
@@ -56,42 +63,27 @@ export function proxyPrefixFromRel(relFromRoot: string): string {
   );
 }
 
-export function bestRootForFile(
+/**
+ * Small helper for “best-effort” rel paths in UIs and logs.
+ */
+export function safeRelFromRoot(
+  rootAbs: string | undefined,
   fileAbs: string,
-  rootsAbs: readonly string[],
-): string | undefined {
-  const f = normalizeSlash(fileAbs);
-  const candidates = rootsAbs
-    .map((r) => normalizeSlash(r))
-    .filter((r) => f === r || f.startsWith(`${r}/`))
-    .sort((a, b) => b.length - a.length);
-  return candidates[0];
+): string {
+  try {
+    if (!rootAbs || rootAbs.trim().length === 0) return fileAbs;
+    const rel = normalizeSlash(relative(rootAbs, fileAbs));
+    if (rel.startsWith("..") || rel === "") return fileAbs;
+    return rel;
+  } catch {
+    return fileAbs;
+  }
 }
 
-export function relFromRoots(
-  fileAbs: string,
-  rootsAbs: readonly string[],
-): string {
-  const root = bestRootForFile(fileAbs, rootsAbs);
-  if (!root) return basename(fileAbs);
-
-  let rel0 = relative(root, fileAbs);
-  rel0 = normalizeSlash(rel0).replaceAll(/^\.\//g, "");
-
-  const rootName = basename(root);
-  const prefix = `${rootName}/`;
-  if (rel0.startsWith(prefix)) rel0 = rel0.slice(prefix.length);
-
-  if (!rel0 || rel0.startsWith("..")) return basename(fileAbs);
-  return rel0;
-}
-
-export function relDirFromRoots(
-  fileAbs: string,
-  rootsAbs: readonly string[],
-): string {
-  const rel = relFromRoots(fileAbs, rootsAbs);
-  const d = dirname(rel);
-  if (d === "." || d === "/" || d.trim() === "") return "";
-  return normalizeSlash(d).replaceAll(/\/+$/g, "");
+export function safeBasename(p: string): string {
+  try {
+    return basename(p);
+  } catch {
+    return String(p);
+  }
 }

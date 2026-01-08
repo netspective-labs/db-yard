@@ -1,25 +1,30 @@
 // lib/serve/watch.ts
 import { ensureDir } from "@std/fs";
-import { join, resolve } from "@std/path";
+import { resolve } from "@std/path";
 import type { Path } from "../discover.ts";
 import {
   exposable,
   type ExposableService,
   type ExposableServiceConf,
 } from "../exposable.ts";
-import type { SpawnedStateEncounter } from "../materialize.ts";
-import { spawnedStates } from "../materialize.ts";
+import { type SpawnedStateEncounter, spawnedStates } from "../materialize.ts";
 import {
-  isPidAlive,
   killPID,
   spawn,
   type SpawnEventListener,
   type SpawnOptions,
 } from "../spawn.ts";
 import { tabular } from "../tabular.ts";
+import {
+  createSpawnSessionHome,
+  relFromRoots,
+  resolveRootsAbs,
+  spawnStatePathForEntry,
+} from "../session.ts";
+import { proxyPrefixFromRel } from "../path.ts";
 
 export type WatchEvent =
-  | Readonly<{ type: "watch_start"; roots: string[]; activeDir: string }>
+  | Readonly<{ type: "watch_start"; roots: string[]; sessionHome: string }>
   | Readonly<{ type: "fs_event"; kind: string; paths: string[] }>
   | Readonly<{
     type: "reconcile_start";
@@ -56,33 +61,10 @@ export type WatchEvent =
 
 export type WatchOptions = Readonly<{
   spawnStateHome: string;
-
-  /**
-   * Stable session directory name under spawnStateHome used for continuous mode.
-   * Default: "active"
-   */
-  activeDirName?: string;
-
-  /**
-   * Debounce file system events before reconciling.
-   * Default: 250ms
-   */
   debounceMs?: number;
-
-  /**
-   * Optional periodic reconcile in addition to FS events.
-   * If omitted or <= 0, disabled.
-   */
   reconcileEveryMs?: number;
-
-  /**
-   * Optional cancellation.
-   */
   signal?: AbortSignal;
 
-  /**
-   * Forwarded to spawn() for service processes.
-   */
   spawn?: Readonly<
     Pick<
       SpawnOptions,
@@ -97,15 +79,13 @@ export type WatchOptions = Readonly<{
     >
   >;
 
-  /**
-   * Wired to spawn()'s onEvent (low-level spawn telemetry).
-   */
   onSpawnEvent?: SpawnEventListener;
-
-  /**
-   * High-level watch events.
-   */
   onWatchEvent?: (event: WatchEvent) => void | Promise<void>;
+}>;
+
+export type WatchSessionArgs = Readonly<{
+  sessionHome: string;
+  rootsAbs: readonly string[];
 }>;
 
 async function emit(opts: WatchOptions, event: WatchEvent): Promise<void> {
@@ -147,10 +127,10 @@ async function discoverServices(
 }
 
 async function readLedger(
-  activeDir: string,
+  sessionHome: string,
 ): Promise<Map<string, SpawnedStateEncounter>> {
   const out = new Map<string, SpawnedStateEncounter>();
-  for await (const st of spawnedStates(activeDir)) {
+  for await (const st of spawnedStates(sessionHome)) {
     const id = String(st?.context?.service?.id ?? "");
     if (!id) continue;
     out.set(id, st);
@@ -158,19 +138,13 @@ async function readLedger(
   return out;
 }
 
-/**
- * Deterministic paths for active ledger files.
- * Keeps the ledger stable across reconciles without needing session stamping logic.
- */
-function defaultSpawnStatePath(
-  activeDir: string,
-  entry: ExposableService,
-  nature: "context" | "stdout" | "stderr",
-): string {
-  const base = `${entry.kind}-${entry.id}`;
-  if (nature === "context") return join(activeDir, `${base}.context.json`);
-  if (nature === "stdout") return join(activeDir, `${base}.stdout.log`);
-  return join(activeDir, `${base}.stderr.log`);
+function isPidAliveNow(pid: number): boolean {
+  try {
+    Deno.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function pickNextPortStart(
@@ -182,12 +156,11 @@ function pickNextPortStart(
     const p = Number(st?.context?.listen?.port);
     if (Number.isFinite(p) && p > 0) {
       const alive = Number.isFinite(st.pid) && st.pid > 0
-        ? isPidAlive(st.pid)
+        ? isPidAliveNow(st.pid)
         : false;
       if (alive) used.add(p);
     }
   }
-
   let port = desiredStart;
   while (used.has(port)) port++;
   return port;
@@ -196,23 +169,24 @@ function pickNextPortStart(
 async function spawnMissing(
   args: Readonly<{
     srcPaths: Iterable<Path>;
-    activeDir: string;
+    sessionHome: string;
+    rootsAbs: readonly string[];
     toSpawn: ReadonlySet<string>;
     onSpawnEvent?: SpawnEventListener;
     spawnOpts?: WatchOptions["spawn"];
   }>,
 ): Promise<number> {
-  const { srcPaths, activeDir, toSpawn, onSpawnEvent, spawnOpts } = args;
+  const { srcPaths, sessionHome, rootsAbs, toSpawn, onSpawnEvent, spawnOpts } =
+    args;
   if (toSpawn.size === 0) return 0;
 
-  const expose = (
-    entry: ExposableService,
-    proxyEndpointPrefixCandidate: string,
-  ) => {
+  const expose = (entry: ExposableService, _candidate: string) => {
     const id = serviceKey(entry);
     if (!toSpawn.has(id)) return false;
 
-    const proxyEndpointPrefix = proxyEndpointPrefixCandidate;
+    const fileAbs = Deno.realPathSync(resolve(entry.supplier.location));
+    const rel = relFromRoots(fileAbs, rootsAbs);
+    const proxyEndpointPrefix = proxyPrefixFromRel(rel);
 
     return {
       proxyEndpointPrefix,
@@ -223,10 +197,10 @@ async function spawnMissing(
   const spawnStatePath = (
     entry: ExposableService,
     nature: "context" | "stdout" | "stderr",
-  ) => defaultSpawnStatePath(activeDir, entry, nature);
+  ) => spawnStatePathForEntry(entry, nature, { sessionHome, rootsAbs });
 
   const desiredPortStart = spawnOpts?.portStart ?? 3000;
-  const ledger = await readLedger(activeDir);
+  const ledger = await readLedger(sessionHome);
   const portStart = pickNextPortStart(desiredPortStart, ledger);
 
   const gen = spawn(srcPaths, expose, spawnStatePath, {
@@ -248,12 +222,13 @@ async function spawnMissing(
 async function reconcileOnce(
   args: Readonly<{
     srcPaths: Iterable<Path>;
-    activeDir: string;
+    sessionHome: string;
+    rootsAbs: readonly string[];
     reason: "fs" | "timer" | "initial";
     opts: WatchOptions;
   }>,
 ): Promise<void> {
-  const { srcPaths, activeDir, reason, opts } = args;
+  const { srcPaths, sessionHome, rootsAbs, reason, opts } = args;
 
   const t0 = performance.now();
   await emit(opts, { type: "reconcile_start", reason });
@@ -277,7 +252,7 @@ async function reconcileOnce(
 
   let ledger: Map<string, SpawnedStateEncounter>;
   try {
-    ledger = await readLedger(activeDir);
+    ledger = await readLedger(sessionHome);
   } catch (error) {
     await emit(opts, { type: "error", phase: "read_ledger", error });
     ledger = new Map();
@@ -285,11 +260,10 @@ async function reconcileOnce(
 
   let killedCount = 0;
 
-  // 3) Kill ledger entries whose source file is deleted or no longer discovered.
   for (const [id, st] of ledger) {
     const loc = String(st?.context?.supplier?.location ?? "");
     const pid = Number(st?.pid);
-    const alive = Number.isFinite(pid) && pid > 0 ? isPidAlive(pid) : false;
+    const alive = Number.isFinite(pid) && pid > 0 ? isPidAliveNow(pid) : false;
 
     const isStillDiscovered = discovered.has(id);
 
@@ -321,7 +295,6 @@ async function reconcileOnce(
     }
   }
 
-  // 4) Spawn missing services or services with dead PIDs.
   const toSpawn = new Set<string>();
   for (const [id] of discovered) {
     const st = ledger.get(id);
@@ -330,7 +303,7 @@ async function reconcileOnce(
       continue;
     }
     const pid = Number(st?.pid);
-    const alive = Number.isFinite(pid) && pid > 0 ? isPidAlive(pid) : false;
+    const alive = Number.isFinite(pid) && pid > 0 ? isPidAliveNow(pid) : false;
     if (!alive) toSpawn.add(id);
   }
 
@@ -339,7 +312,8 @@ async function reconcileOnce(
     try {
       spawnedCount = await spawnMissing({
         srcPaths,
-        activeDir,
+        sessionHome,
+        rootsAbs,
         toSpawn,
         onSpawnEvent: opts.onSpawnEvent,
         spawnOpts: opts.spawn,
@@ -361,25 +335,25 @@ async function reconcileOnce(
 }
 
 /**
- * Robust “db-yard watcher” that keeps spawned services in sync with filesystem state.
+ * Run watch loop in a pre-created sessionHome (used by web-ui so UI + watcher share one session).
  */
-export async function watchYard(
+export async function watchYardInSession(
   srcPaths: Iterable<Path>,
   opts: WatchOptions,
+  session: WatchSessionArgs,
 ): Promise<void> {
   const debounceMs = opts.debounceMs ?? 250;
-  const activeDirName = opts.activeDirName ?? "active";
 
-  const spawnStateHome = resolve(opts.spawnStateHome);
-  const activeDir = resolve(join(spawnStateHome, activeDirName));
-  await ensureDir(activeDir);
-
-  const roots = Array.from(srcPaths).map((p) => resolve(p.path));
-  await emit(opts, { type: "watch_start", roots, activeDir });
+  const srcArr = Array.from(srcPaths);
+  const roots = srcArr.map((p) => resolve(p.path));
+  await emit(opts, {
+    type: "watch_start",
+    roots,
+    sessionHome: session.sessionHome,
+  });
 
   const signal = opts.signal;
 
-  // Serialize reconciles, coalesce triggers.
   let reconcileRunning: Promise<void> | undefined;
   let reconcileQueued = false;
   let debounceTimer: number | undefined;
@@ -396,7 +370,13 @@ export async function watchYard(
 
       reconcileRunning = (async () => {
         try {
-          await reconcileOnce({ srcPaths, activeDir, reason, opts });
+          await reconcileOnce({
+            srcPaths: srcArr,
+            sessionHome: session.sessionHome,
+            rootsAbs: session.rootsAbs,
+            reason,
+            opts,
+          });
         } catch (error) {
           await emit(opts, { type: "error", phase: "reconcile", error });
         } finally {
@@ -420,10 +400,8 @@ export async function watchYard(
     }
   };
 
-  // Initial reconcile.
   runReconcile("initial");
 
-  // Optional periodic reconcile.
   let intervalId: number | undefined;
   const every = opts.reconcileEveryMs ?? 0;
   if (every > 0) {
@@ -457,15 +435,13 @@ export async function watchYard(
         kind: safeWatcherEventKind(ev),
         paths: safePathsFromEvent(ev),
       });
-
       runReconcile("fs");
     }
 
-    if (isAborted(signal)) {
-      await emit(opts, { type: "watch_end", reason: "aborted" });
-    } else {
-      await emit(opts, { type: "watch_end", reason: "closed" });
-    }
+    await emit(opts, {
+      type: "watch_end",
+      reason: isAborted(signal) ? "aborted" : "closed",
+    });
   } catch (error) {
     await emit(opts, { type: "error", phase: "watch", error });
     await emit(opts, { type: "watch_end", reason: "error" });
@@ -497,4 +473,24 @@ export async function watchYard(
       // ignore
     }
   }
+}
+
+/**
+ * Back-compat API: creates a new stamped session dir under spawnStateHome and runs watcher in it.
+ */
+export async function watchYard(
+  srcPaths: Iterable<Path>,
+  opts: WatchOptions,
+): Promise<void> {
+  const spawnStateHome = resolve(opts.spawnStateHome);
+  await ensureDir(spawnStateHome);
+
+  const srcArr = Array.from(srcPaths);
+  const rootsAbs = resolveRootsAbs(srcArr);
+  const session = await createSpawnSessionHome(spawnStateHome);
+
+  await watchYardInSession(srcArr, opts, {
+    sessionHome: session.sessionHome,
+    rootsAbs,
+  });
 }
