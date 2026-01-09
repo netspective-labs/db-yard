@@ -1,168 +1,180 @@
 <!-- bin/web-ui/asset/index.html -->
-<!doctype html>
+<!DOCTYPE html>
 <html>
-
-<head>
+  <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>db-yard web UI</title>
     <link rel="stylesheet" href="/.db-yard/asset/styles.css" />
     <link rel="icon" href="/.db-yard/asset/favicon.ico">
-</head>
+  </head>
 
-<body>
+  <body>
     <header class="topbar">
-        <div class="title">db-yard</div>
-        <div class="links">
-            <a href="/.db-yard/ledger.d/">Browse ledger.d</a>
-            <a href="/.db-yard/api/tagged-processes.json" target="_blank" rel="noreferrer">API</a>
-        </div>
+      <div class="title">db-yard</div>
+      <div class="links">
+        <a href="/.db-yard/ledger.d/">Browse ledger.d</a>
+        <a
+          href="/.db-yard/api/tagged-processes.json"
+          target="_blank"
+          rel="noreferrer"
+        >API</a>
+      </div>
     </header>
 
     <main class="container">
+      <section class="status">
+        <div class="controls">
+          <label class="mono">
+            Filter
+            <input
+              id="filterInput"
+              type="text"
+              placeholder="serviceId, pid, upstreamUrl, path…"
+            />
+          </label>
+          <button id="refreshBtn">Refresh</button>
+        </div>
+      </section>
 
-        <section class="status">
-            <div class="controls">
-                <label class="mono">
-                    Filter
-                    <input id="filterInput" type="text" placeholder="serviceId, pid, upstreamUrl, path…" />
-                </label>
-                <button id="refreshBtn">Refresh</button>
-            </div>
+      <section class="block">
+        <div class="block-title">Running services</div>
+        <div class="block-desc">
+          Shows tagged processes discovered on this machine. Use Proxied URL to
+          access each upstream through db-yard. Ledger Context links to the
+          exact context file. STDOUT and STDERR link to the ledger log files.
+        </div>
+
+        <section class="card">
+          <table class="table" id="procTable">
+            <thead>
+              <tr>
+                <th>PID</th>
+                <th>Upstream URL</th>
+                <th>Proxied URL</th>
+                <th>DB Yard Service</th>
+                <th>Ledger Context</th>
+                <th class="actions">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="procTbody"></tbody>
+          </table>
+          <div class="hint mono">
+            Proxy behavior: requests are matched by longest proxyEndpointPrefix.
+          </div>
+        </section>
+      </section>
+
+      <section class="block">
+        <div class="block-title">Reconcile</div>
+        <div class="block-desc">
+          Compares tagged processes vs ledger context.json files. If a process
+          exists without a ledger entry, or a ledger entry exists without a live
+          process, it will be listed here.
+        </div>
+
+        <section class="status" style="margin-top: 10px">
+          <div class="controls">
+            <button id="reconcileBtn">Run reconcile</button>
+            <button id="proxyTableBtn">Load proxy table</button>
+            <button id="healthBtn">Run health checks</button>
+          </div>
         </section>
 
-        <section class="block">
-            <div class="block-title">Running services</div>
-            <div class="block-desc">
-                Shows tagged processes discovered on this machine. Use Proxied URL to access each upstream through
-                db-yard.
-                Ledger Context links to the exact context file. STDOUT and STDERR link to the ledger log files.
-            </div>
+        <section class="card">
+          <table class="table" id="reconcileTable">
+            <thead>
+              <tr>
+                <th>kind</th>
+                <th>pid</th>
+                <th>serviceId</th>
+                <th>sessionId</th>
+                <th>path</th>
+                <th>cmdline</th>
+              </tr>
+            </thead>
+            <tbody id="reconcileTbody"></tbody>
+          </table>
+          <div class="hint mono">
+            ledger_without_process usually means the process crashed after
+            spawning. Check STDOUT/STDERR for clues.
+          </div>
+        </section>
+      </section>
 
-            <section class="card">
-                <table class="table" id="procTable">
-                    <thead>
-                        <tr>
-                            <th>PID</th>
-                            <th>Upstream URL</th>
-                            <th>Proxied URL</th>
-                            <th>DB Yard Service</th>
-                            <th>Ledger Context</th>
-                            <th class="actions">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody id="procTbody"></tbody>
-                </table>
-                <div class="hint mono">
-                    Proxy behavior: requests are matched by longest proxyEndpointPrefix.
-                </div>
-            </section>
+      <section class="block">
+        <div class="block-title">Proxy resolver</div>
+        <div class="block-desc">
+          Debug helper. Enter a pathname (like a Proxied URL) to see which
+          upstream and basePath match will be used.
+        </div>
+
+        <section class="status" style="margin-top: 10px">
+          <div class="controls">
+            <label class="mono">
+              Resolve proxy path
+              <input
+                id="resolveInput"
+                type="text"
+                placeholder="/controls/scf-2025.3"
+                style="width: 360px"
+              />
+            </label>
+            <button id="resolveBtn">Resolve</button>
+          </div>
         </section>
 
-        <section class="block">
-            <div class="block-title">Reconcile</div>
-            <div class="block-desc">
-                Compares tagged processes vs ledger context.json files. If a process exists without a ledger entry, or a
-                ledger
-                entry exists without a live process, it will be listed here.
-            </div>
-
-            <section class="status" style="margin-top: 10px;">
-                <div class="controls">
-                    <button id="reconcileBtn">Run reconcile</button>
-                    <button id="proxyTableBtn">Load proxy table</button>
-                    <button id="healthBtn">Run health checks</button>
-                </div>
-            </section>
-
-            <section class="card">
-                <table class="table" id="reconcileTable">
-                    <thead>
-                        <tr>
-                            <th>kind</th>
-                            <th>pid</th>
-                            <th>serviceId</th>
-                            <th>sessionId</th>
-                            <th>path</th>
-                            <th>cmdline</th>
-                        </tr>
-                    </thead>
-                    <tbody id="reconcileTbody"></tbody>
-                </table>
-                <div class="hint mono">
-                    ledger_without_process usually means the process crashed after spawning. Check STDOUT/STDERR for
-                    clues.
-                </div>
-            </section>
+        <section class="card">
+          <table class="table" id="proxyTable">
+            <thead>
+              <tr>
+                <th>basePath</th>
+                <th>upstreamUrl</th>
+              </tr>
+            </thead>
+            <tbody id="proxyTbody"></tbody>
+          </table>
+          <div class="hint mono" id="proxyConflictsText">
+            Proxy conflicts: (not loaded)
+          </div>
         </section>
+      </section>
 
-        <section class="block">
-            <div class="block-title">Proxy resolver</div>
-            <div class="block-desc">
-                Debug helper. Enter a pathname (like a Proxied URL) to see which upstream and basePath match will be
-                used.
-            </div>
+      <section class="block">
+        <div class="block-title">Upstream health checks</div>
+        <div class="block-desc">
+          Fetches each upstreamUrl with a short timeout and reports whether it
+          responds. Useful for spotting dead services and mismatched proxy
+          mappings.
+        </div>
 
-            <section class="status" style="margin-top: 10px;">
-                <div class="controls">
-                    <label class="mono">
-                        Resolve proxy path
-                        <input id="resolveInput" type="text" placeholder="/controls/scf-2025.3" style="width: 360px;" />
-                    </label>
-                    <button id="resolveBtn">Resolve</button>
-                </div>
-            </section>
-
-            <section class="card">
-                <table class="table" id="proxyTable">
-                    <thead>
-                        <tr>
-                            <th>basePath</th>
-                            <th>upstreamUrl</th>
-                        </tr>
-                    </thead>
-                    <tbody id="proxyTbody"></tbody>
-                </table>
-                <div class="hint mono" id="proxyConflictsText">Proxy conflicts: (not loaded)</div>
-            </section>
+        <section class="card">
+          <table class="table" id="healthTable">
+            <thead>
+              <tr>
+                <th>basePath</th>
+                <th>upstreamUrl</th>
+                <th>ok</th>
+                <th>status</th>
+                <th>ms</th>
+                <th>error</th>
+              </tr>
+            </thead>
+            <tbody id="healthTbody"></tbody>
+          </table>
+          <div class="hint mono">
+            Health checks fetch each upstreamUrl with a short timeout and report
+            status.
+          </div>
         </section>
-
-        <section class="block">
-            <div class="block-title">Upstream health checks</div>
-            <div class="block-desc">
-                Fetches each upstreamUrl with a short timeout and reports whether it responds. Useful for spotting dead
-                services
-                and mismatched proxy mappings.
-            </div>
-
-            <section class="card">
-                <table class="table" id="healthTable">
-                    <thead>
-                        <tr>
-                            <th>basePath</th>
-                            <th>upstreamUrl</th>
-                            <th>ok</th>
-                            <th>status</th>
-                            <th>ms</th>
-                            <th>error</th>
-                        </tr>
-                    </thead>
-                    <tbody id="healthTbody"></tbody>
-                </table>
-                <div class="hint mono">
-                    Health checks fetch each upstreamUrl with a short timeout and report status.
-                </div>
-            </section>
-        </section>
-
+      </section>
     </main>
 
     <footer class="footer mono">
-        <div id="procStatusText">Loading…</div>
-        <div id="reconcileStatusText">Reconcile: not run</div>
+      <div id="procStatusText">Loading…</div>
+      <div id="reconcileStatusText">Reconcile: not run</div>
     </footer>
 
     <script src="/.db-yard/asset/app.js"></script>
-</body>
-
+  </body>
 </html>
