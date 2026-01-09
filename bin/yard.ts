@@ -4,6 +4,7 @@ import { Command, EnumType } from "@cliffy/command";
 import { CompletionsCommand } from "@cliffy/completions";
 import { HelpCommand } from "@cliffy/help";
 import { blue, cyan, dim, green, red, yellow } from "@std/fmt/colors";
+import { compose } from "../lib/composite.ts";
 import {
   materialize,
   reconcile,
@@ -156,7 +157,6 @@ async function psReconcile(
       );
 
       if (!any && !ok) {
-        // should not happen, but keep output consistent
         console.log(dim("  (no items emitted)"));
       }
       return;
@@ -169,6 +169,8 @@ async function psReconcile(
 
 const verboseType = new EnumType(["essential", "comprehensive"] as const);
 const proxyType = new EnumType(["nginx", "traefik", "both"] as const);
+const dialectType = new EnumType(["SQLite", "DuckDB"] as const);
+const scopeType = new EnumType(["admin", "cross-tenant", "tenant"] as const);
 
 const defaultCargoHome = "./cargo.d";
 const defaultLedgerHome = "./ledger.d";
@@ -230,6 +232,105 @@ await new Command()
     if (ls) {
       await lsProcesses();
     }
+  })
+  .command(
+    "cc",
+    "Generate SQL DDL for Composite Connections (CC) and emit to STDOUT",
+  )
+  .type("dialect", dialectType)
+  .type("scope", scopeType)
+  .option(
+    "--volume-root <dir:string>",
+    "Root directory containing embedded/ (default '.')",
+    { default: "." },
+  )
+  .option(
+    "--scope <scope:scope>",
+    "Which composite scope to target (admin, cross-tenant, tenant)",
+    { default: "admin" },
+  )
+  .option(
+    "--tenant-id <id:string>",
+    "Tenant ID (required when --scope tenant)",
+  )
+  .option(
+    "--dialect <d:dialect>",
+    "SQL dialect for ATTACH statements",
+    { default: "SQLite" },
+  )
+  .option(
+    "--globs <csv:string>",
+    "CSV list of glob patterns to discover embedded DB files",
+    { default: "**/*.sqlite.db,**/*.sqlite,**/*.db" },
+  )
+  .option(
+    "--ignore <csv:string>",
+    "CSV list of additional ignore paths (relative to baseDir or absolute)",
+  )
+  .option(
+    "--pragma-order <order:string>",
+    "Pragma emission order: sorted | asProvided",
+    { default: "sorted" },
+  )
+  .option(
+    "--extra-sql-order <order:string>",
+    "Extra SQL emission order: sorted | asProvided",
+    { default: "sorted" },
+  )
+  .option(
+    "--duckdb-sqlite-ext",
+    "DuckDB only: emit INSTALL sqlite; LOAD sqlite; preamble (order-preserved)",
+  )
+  .action(async (o) => {
+    const parseCsv = (s: string): string[] =>
+      s.split(",").map((x) => x.trim()).filter((x) => x.length > 0);
+
+    const globs = parseCsv(o.globs);
+
+    const ignore = o.ignore
+      ? parseCsv(o.ignore).map((p) =>
+        // allow relative ignores; resolve them later under baseDir
+        p
+      )
+      : undefined;
+
+    if (o.scope === "tenant" && !o.tenantId) {
+      console.error(red("cc: --tenant-id is required when --scope tenant"));
+      Deno.exit(2);
+    }
+
+    const result = await compose({
+      layout: { volumeRoot: o.volumeRoot },
+      scope: o.scope,
+      tenantId: o.tenantId,
+      dialect: o.dialect,
+      configure: (_ctx) => ({
+        globs,
+        ignore,
+        pragmaOrder: o.pragmaOrder === "asProvided" ? "asProvided" : "sorted",
+        extraSqlOrder: o.extraSqlOrder === "asProvided"
+          ? "asProvided"
+          : "sorted",
+        // Keep aliasing deterministic and stable by default.
+        // If you want a different alias policy (e.g. cross_ prefixes), extend with another CLI option.
+        aliasForKey: (stableKey: string) => {
+          const file = stableKey.split("/").pop() ?? stableKey;
+          return file.replace(/\.sqlite(\.db)?$/i, "").replace(/\.db$/i, "");
+        },
+        pragmas: (ctx) => {
+          // In this CLI command we treat pragmas as a “preamble”. We keep it minimal and deterministic.
+          // For DuckDB attaching SQLite files, users typically need sqlite extension loaded.
+          if (ctx.dialect === "DuckDB" && o.duckdbSqliteExt) {
+            // INSTALL then LOAD order matters.
+            return ["INSTALL sqlite;", "LOAD sqlite;"];
+          }
+          return [];
+        },
+      }),
+    });
+
+    // Emit to STDOUT
+    console.log(result.sql);
   })
   .command(
     "ls",

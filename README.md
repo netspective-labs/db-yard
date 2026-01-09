@@ -238,6 +238,39 @@ bin/yard.ts proxy-conf --type both
 Supported options include prefix overrides, strip-prefix, and engine-specific
 flags.
 
+## Composite Connections
+
+db-yard includes a deterministic composite SQL DDL generator for "virtual
+aggregation" of multiple embedded databases (like SQLite) in a single connection
+using [this strategy](support/rfc/composite.md).
+
+Most composites are executed against an ephemeral database (often `:memory:` for
+SQLite, or an in-memory DuckDB connection) when you only need a transient
+“single-connection” view.
+
+You can also execute the generated SQL against a persistent composite database
+file (e.g. `composite.sqlite.auto.db` or `composite.duckdb.auto.db`). In that
+case:
+
+- The ATTACH statements are not “saved” as permanent mounts. They run
+  per-connection, so each time you open the composite DB you must execute the
+  composite.sql again (unless your runtime always bootstraps the connection with
+  the SQL).
+- Any CREATE VIEW / CREATE TABLE emitted by composite.sql _is_ persisted in that
+  composite DB file. This can be desirable for stable views or materialized
+  rollups, but it also means schema changes require regeneration or migration.
+
+```bash
+# SQLite SQL DDL for composite connections in admin scope (default)
+./bin/yard.ts cc --volume-root /var/db-yard --scope admin
+
+# Tenant SQL DDL for composite connections
+./bin/yard.ts cc --volume-root /var/db-yard --scope tenant --tenant-id tenant-123
+
+# DuckDB SQL DDL for composite connections that can attach SQLite DBs (includes INSTALL/LOAD sqlite preamble)
+./bin/yard.ts cc --dialect DuckDB --duckdb-sqlite-ext --volume-root /var/db-yard --scope cross-tenant
+```
+
 ## Web UI
 
 ![db-yard Web UI Screenshot](project-screen.webp)
