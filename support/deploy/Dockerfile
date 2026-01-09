@@ -3,9 +3,19 @@
 # db-yard container (Debian “mini” base)
 #
 # HTTPS + CNAME (example eg.surveilr.com):
-# - Point eg.surveilr.com to the host (CNAME or A/AAAA).
-# - Terminate TLS in a host reverse proxy (Caddy / NGINX / Traefik).
-# - Proxy 443 -> container HTTP port (default 8787). Keep container HTTP-only.
+# - DNS: create a CNAME eg.surveilr.com -> your public host name (or A/AAAA to server IP).
+# - TLS: terminate HTTPS at the edge with a reverse proxy (Caddy / NGINX / Traefik).
+# - Proxy: forward 443 -> container HTTP port (DB_YARD_WEB_UI_PORT, default 8787).
+# - Run container HTTP-only; let the proxy manage certificates.
+#
+# Example run (explicit publish, since EXPOSE is omitted intentionally):
+#   docker run --rm \
+#     -p 8787:8787 \
+#     -v $(pwd)/cargo.d:/work/cargo.d \
+#     your-image:tag
+#
+# If you change DB_YARD_WEB_UI_PORT at runtime, publish that port explicitly:
+#   docker run --rm -e DB_YARD_WEB_UI_PORT=8788 -p 8788:8788 ...
 
 FROM debian:bookworm-slim
 
@@ -43,14 +53,15 @@ RUN brew update \
   && brew install eget sqlpage
 
 # ---- Install surveilr via eget ----------------------------------------------
-# Uses surveilr/packages releases; installs to /usr/local/bin by default
+# Installs the appropriate Linux binary from surveilr/packages releases.
+# If you want to pin a specific version, add: `eget -v <version> surveilr/packages -o /usr/local/bin`
 RUN eget surveilr/packages -o /usr/local/bin
 
 # ---- Runtime ----------------------------------------------------------------
 WORKDIR /work
-VOLUME ["/work/cargo.d"]
 
-EXPOSE 8787
+# Expect caller to mount /work/cargo.d; `yard.ts start` will create ledger.d.
+VOLUME ["/work/cargo.d"]
 
 RUN cat > /usr/local/bin/db-yard-entrypoint.sh <<'EOF' \
 #!/usr/bin/env sh
