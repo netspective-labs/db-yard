@@ -1,13 +1,25 @@
 /**
  * @module lib/composite
  *
- * Deterministic composite.sql generator for db-yard embedded SQLite “composite connections”.
+ * Deterministic composite SQL generator for db-yard embedded composite connections.
  *
- * This module discovers SQLite database files using globs and generates a deterministic
+ * This module discovers embedded database files using globs and generates a deterministic
  * `composite.sql` file containing:
- * - `ATTACH DATABASE ... AS <alias>;` statements for each discovered DB
- * - optional PRAGMAs (e.g., WAL mode) emitted in a deterministic order
- * - optional extra SQL (typically views) emitted in a deterministic order
+ * - ATTACH statements for each discovered DB (dialect-aware: SQLite or DuckDB)
+ * - optional PRAGMAs (SQLite) or SET/PRAGMA-like statements (DuckDB) emitted deterministically
+ * - optional extra SQL (typically views) emitted deterministically
+ *
+ * Execution model notes
+ * - Most composites are executed against an ephemeral database (often `:memory:` for SQLite, or an
+ *   in-memory DuckDB connection) when you only need a transient “single-connection” view.
+ * - You can also execute the generated SQL against a persistent composite database file
+ *   (e.g. `composite.sqlite.auto.db` or `composite.duckdb.auto.db`). In that case:
+ *   - The ATTACH statements are not “saved” as permanent mounts. They run per-connection, so each
+ *     time you open the composite DB you must execute the composite.sql again (unless your runtime
+ *     always bootstraps the connection with the SQL).
+ *   - Any CREATE VIEW / CREATE TABLE emitted by composite.sql *is* persisted in that composite DB file.
+ *     This can be desirable for stable views or materialized rollups, but it also means schema changes
+ *     require regeneration or migration.
  *
  * Determinism contract (core invariants)
  * 1) Discovery order must never influence aliasing or ATTACH output.
@@ -16,41 +28,10 @@
  * 2) Optional PRAGMAs / extra SQL are emitted in a fixed, documented order.
  *    - Pragmas are normalized, deduped, and sorted lexicographically by default.
  *    - Extra SQL is normalized and (optionally) sorted by default to avoid nondeterminism.
+ *      For multi-line DDL that must preserve author order (e.g. views), set `extraSqlOrder: "asProvided"`.
  * 3) Default SQL header is deterministic (no timestamps).
  *
- * If you need the clearest “what should the output look like?” reference,
- * see the golden-string tests in `compose_test.ts`, which encode the expected SQL exactly.
- *
- * Basic example
- * ```ts
- * import { compose } from "./lib/composite.ts";
- *
- * const result = await compose({
- *   layout: { volumeRoot: "/var/db-yard" },
- *   scope: "tenant",
- *   tenantId: "tenant-123",
- *   configure: (ctx) => ({
- *     globs: ["db*.sqlite.db", "db*.db"],
- *     // Alias is derived from stableKey (relative path) by default.
- *     pragmas: () => [
- *       // Enable only if this composite will be used for read/write workflows.
- *       // "PRAGMA journal_mode = WAL;",
- *       // "PRAGMA synchronous = NORMAL;",
- *     ],
- *     extraSql: (dbs) => {
- *       // Optionally create a view across attached DBs (deterministically).
- *       const unions = dbs.map((d) => `SELECT '${d.alias}' AS source_db, * FROM ${d.alias}.evidence`);
- *       return unions.length
- *         ? [`CREATE VIEW IF NOT EXISTS all_evidence AS\n${unions.join("\nUNION ALL\n")};`]
- *         : [];
- *     },
- *   }),
- * });
- *
- * // Write result.sql to <baseDir>/composite.sql; a separate step can execute it
- * // to build composite.sqlite.auto.db.
- * console.log(result.sql);
- * ```
+ * The golden-string tests in `composite_test.ts` are the best reference for exact output shapes.
  */
 
 // deno-lint-ignore no-explicit-any
@@ -60,6 +41,18 @@ import { expandGlob } from "jsr:@std/fs@^1.0.0/expand-glob";
 import { basename, join, normalize, relative } from "jsr:@std/path@^1.0.0";
 
 export type CompositeScope = "admin" | "cross-tenant" | "tenant";
+
+/**
+ * Dialect determines ATTACH syntax and conventions.
+ *
+ * - SQLite: `ATTACH DATABASE 'path' AS alias;`
+ * - DuckDB: `ATTACH 'path' AS alias (TYPE sqlite);` for SQLite files by default.
+ *
+ * Notes:
+ * - DuckDB requires `INSTALL sqlite; LOAD sqlite;` before attaching SQLite DBs.
+ *   You can emit these via `pragmas()` (or rename in your app layer if preferred).
+ */
+export type CompositeDialect = "SQLite" | "DuckDB";
 
 export interface CompositeLayout {
   readonly volumeRoot: string;
@@ -126,7 +119,7 @@ export function defaultAliasForKey(stableKey: string): string {
 }
 
 /**
- * Emits ATTACH statements that SQLite can run.
+ * Emits dialect-aware ATTACH statements.
  */
 export interface SqlEmitter {
   header?(ctx: ComposeContext<Any>): string | string[];
@@ -135,16 +128,16 @@ export interface SqlEmitter {
 }
 
 /**
- * Default deterministic SQLite emitter (no timestamps).
+ * Default deterministic emitter (no timestamps), dialect-aware.
  */
-export const defaultSqliteEmitter: SqlEmitter = {
+export const defaultEmitter: SqlEmitter = {
   header(ctx) {
     const lines: string[] = [];
     lines.push(
-      "-- Auto-generated by compose(); DO NOT EDIT composite.sqlite.auto.db directly",
+      "-- Auto-generated by compose(); DO NOT EDIT derived composite DB directly",
     );
     lines.push(
-      `-- scope: ${ctx.scope}${
+      `-- dialect: ${ctx.dialect} | scope: ${ctx.scope}${
         ctx.tenantId ? ` tenantId=${ctx.tenantId}` : ""
       }`,
     );
@@ -156,8 +149,7 @@ export const defaultSqliteEmitter: SqlEmitter = {
     return lines;
   },
   attach(db, ctx) {
-    const attachPath = ctx.makeAttachPath(db.path);
-    return `ATTACH DATABASE '${sqlQuoteSingle(attachPath)}' AS ${db.alias};`;
+    return emitAttach(db, ctx);
   },
   footer(ctx) {
     const lines: string[] = [];
@@ -181,6 +173,8 @@ export interface ComposeContext<TMeta = unknown> {
   layout: Required<CompositeLayout>;
   scope: CompositeScope;
   tenantId?: string;
+
+  dialect: CompositeDialect;
 
   baseDir: string;
 
@@ -218,7 +212,17 @@ export interface ComposeConfig<TMeta = unknown> {
     ctx: ComposeContext<TMeta>,
   ) => TMeta | Promise<TMeta>;
 
+  /**
+   * Dialect-specific “preamble” statements.
+   * - SQLite: PRAGMA journal_mode, synchronous, foreign_keys, etc.
+   * - DuckDB: INSTALL/LOAD sqlite, SET threads, etc.
+   */
   pragmas?: (ctx: ComposeContext<TMeta>) => string[] | Promise<string[]>;
+
+  /**
+   * Extra DDL such as CREATE VIEW statements. If you return multi-line SQL that
+   * must preserve ordering, set extraSqlOrder="asProvided".
+   */
   extraSql?: (
     dbs: readonly DiscoveredDb<TMeta>[],
     ctx: ComposeContext<TMeta>,
@@ -237,6 +241,13 @@ export async function compose<TMeta = unknown>(args: {
   layout: CompositeLayout;
   scope: CompositeScope;
   tenantId?: string;
+
+  /**
+   * Dialect selects ATTACH syntax and conventions.
+   * Default is "SQLite".
+   */
+  dialect?: CompositeDialect;
+
   configure: (
     ctx: ComposeContext<TMeta>,
   ) => ComposeConfig<TMeta> | Promise<ComposeConfig<TMeta>>;
@@ -245,6 +256,7 @@ export async function compose<TMeta = unknown>(args: {
   const layout = withDefaults(args.layout);
   const scope = args.scope;
   const tenantId = args.tenantId;
+  const dialect: CompositeDialect = args.dialect ?? "SQLite";
 
   const baseDir = scopeBaseDir(layout, scope, tenantId);
 
@@ -252,6 +264,7 @@ export async function compose<TMeta = unknown>(args: {
     layout,
     scope,
     tenantId,
+    dialect,
     baseDir,
     pragmas: [],
     extraSql: [],
@@ -264,8 +277,6 @@ export async function compose<TMeta = unknown>(args: {
       return absDbPath;
     },
     stableKeyForPath: (absDbPath: string) => {
-      // Canonical stable key used for sorting + aliasing.
-      // Prefer a normalized relative path within scope. Else fall back to normalized absolute path.
       const absBase = normalize(baseDir);
       const absDb = normalize(absDbPath);
       if (absDb.startsWith(absBase + "/") || absDb === absBase) {
@@ -282,7 +293,7 @@ export async function compose<TMeta = unknown>(args: {
 
   const config = await args.configure(ctx);
   const walker = args.walker ?? denoGlobWalker;
-  const emitter = config.emitter ?? defaultSqliteEmitter;
+  const emitter = config.emitter ?? defaultEmitter;
 
   const pragmaOrder: DeterministicOrder = config.pragmaOrder ?? "sorted";
   const extraSqlOrder: DeterministicOrder = config.extraSqlOrder ?? "sorted";
@@ -306,12 +317,7 @@ export async function compose<TMeta = unknown>(args: {
     candidatesAbs.push(abs);
   }
 
-  // Canonicalize candidates:
-  // 1) normalize
-  // 2) dedupe
-  // 3) filter by include + looksLikeSqliteDb
-  // 4) compute stableKey
-  // 5) sort by stableKey
+  // Canonicalize candidates (deterministic)
   const seen = new Set<string>();
   const filtered: { absPath: string; stableKey: string }[] = [];
 
@@ -321,7 +327,7 @@ export async function compose<TMeta = unknown>(args: {
     seen.add(abs);
 
     if (ignore.has(abs)) continue;
-    if (!looksLikeSqliteDb(abs)) continue;
+    if (!looksLikeEmbeddedDb(abs)) continue;
     if (config.include && !(await config.include(abs, ctx))) continue;
 
     const stableKey = ctx.stableKeyForPath(abs);
@@ -347,7 +353,7 @@ export async function compose<TMeta = unknown>(args: {
   const extraSqlRaw = (await config.extraSql?.(dbs, ctx)) ?? [];
   ctx.extraSql = canonicalizeLines(extraSqlRaw, extraSqlOrder);
 
-  // Emit SQL (deterministic: order is dbs in stableKey sort order)
+  // Emit SQL (deterministic order)
   const lines: string[] = [];
   const push = (s: string | string[]) =>
     Array.isArray(s) ? lines.push(...s) : lines.push(s);
@@ -356,7 +362,10 @@ export async function compose<TMeta = unknown>(args: {
   for (const db of dbs) {
     const stmt = emitter.attach
       ? emitter.attach(db, ctx)
-      : defaultSqliteEmitter.attach!(db, ctx);
+      : emitAttach(
+        db as unknown as DiscoveredDb<Any>,
+        ctx as unknown as ComposeContext<Any>,
+      );
     push(stmt);
   }
   if (emitter.footer) push(emitter.footer(ctx));
@@ -371,19 +380,44 @@ export async function compose<TMeta = unknown>(args: {
   return { ctx, dbs, sql };
 }
 
+/**
+ * Dialect-aware ATTACH.
+ *
+ * SQLite:
+ *   ATTACH DATABASE 'path' AS alias;
+ *
+ * DuckDB (attaching SQLite DB files):
+ *   ATTACH 'path' AS alias (TYPE sqlite);
+ *
+ * If you later want DuckDB-to-DuckDB attaching, extend this to use
+ * TYPE duckdb (or omit TYPE) based on a per-db meta flag.
+ */
+export function emitAttach(
+  db: DiscoveredDb<Any>,
+  ctx: ComposeContext<Any>,
+): string {
+  const attachPath = ctx.makeAttachPath(db.path);
+
+  if (ctx.dialect === "SQLite") {
+    return `ATTACH DATABASE '${sqlQuoteSingle(attachPath)}' AS ${db.alias};`;
+  }
+
+  // DuckDB
+  // For now we assume the discovered files are SQLite databases.
+  // Callers should include `INSTALL sqlite; LOAD sqlite;` in ctx.pragmas via config.pragmas().
+  return `ATTACH '${sqlQuoteSingle(attachPath)}' AS ${db.alias} (TYPE sqlite);`;
+}
+
 function canonicalizeLines(
   input: string[],
   order: DeterministicOrder,
 ): string[] {
-  // Normalize line endings and trim trailing whitespace for deterministic comparisons.
-  // Dedup while preserving determinism. For "sorted" we dedup by Set then sort.
   const normalized = input
     .flatMap((s) => s.split("\n"))
     .map((s) => s.trimEnd())
     .filter((s) => s.length > 0);
 
   if (order === "asProvided") {
-    // Dedup in first-seen order
     const seen = new Set<string>();
     const out: string[] = [];
     for (const s of normalized) {
@@ -394,7 +428,6 @@ function canonicalizeLines(
     return out;
   }
 
-  // sorted
   return [...new Set(normalized)].sort((a, b) => a.localeCompare(b));
 }
 
@@ -430,7 +463,7 @@ function isProbablyAbsolute(p: string): boolean {
   return p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p);
 }
 
-function looksLikeSqliteDb(p: string): boolean {
+function looksLikeEmbeddedDb(p: string): boolean {
   const b = basename(p).toLowerCase();
   if (b.endsWith(".sqlite")) return true;
   if (b.endsWith(".sqlite.db")) return true;
