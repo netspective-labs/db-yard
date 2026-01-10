@@ -161,6 +161,24 @@ function makeProxiedUrl(upstreamUrl: string, rest: string, reqUrl?: string) {
   return proxied.toString();
 }
 
+/*
+Fix for issue #11:
+If the browser navigates to an absolute path like "/foo" from inside a proxied page,
+the request loses the basePath prefix. We infer the basePath from Referer and retry.
+*/
+function inferBasePathFromReferer(c: Context, routes: ProxyRoute[]) {
+  const ref = c.req.header("referer");
+  if (!ref) return null;
+
+  try {
+    const u = new URL(ref);
+    const resolved = resolveProxyPath(u.pathname, routes);
+    return resolved?.route.basePath ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export function registerProxyApiRoutes(deps: ProxyDeps) {
   const { app, apiMount, uiMount, ledgerDir, getProcesses } = deps;
 
@@ -376,10 +394,25 @@ export function registerCatchAllProxy(deps: ProxyDeps) {
     const processes = await getProcesses();
     const { table } = buildProxyTableWithConflicts(processes);
 
-    const path = c.req.path;
-    const resolved = resolveProxyPath(path, table);
+    const reqPath = c.req.path;
+    let resolved = resolveProxyPath(reqPath, table);
+
+    // Issue #11 fix: retry using Referer-derived basePath if the current path has no mapping.
     if (!resolved) {
-      return c.text(`No upstream mapping for "${path}". Try ${uiMount}/`, 502);
+      const inferredBase = inferBasePathFromReferer(c, table);
+      if (
+        inferredBase && !reqPath.startsWith(inferredBase + "/") &&
+        reqPath !== inferredBase
+      ) {
+        resolved = resolveProxyPath(inferredBase + reqPath, table);
+      }
+    }
+
+    if (!resolved) {
+      return c.text(
+        `No upstream mapping for "${reqPath}". Try ${uiMount}/`,
+        502,
+      );
     }
 
     const proxiedUrl = makeProxiedUrl(
