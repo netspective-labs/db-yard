@@ -92,7 +92,8 @@ function renderProcesses(payload) {
     const ctxHref = ledgerHref(relContext);
     const ctxLabel = relContext || String(contextPath || "");
     const ledgerCell = ctxHref
-      ? `<a class="mono" href="${esc(ctxHref)
+      ? `<a class="mono" href="${
+        esc(ctxHref)
       }" target="_blank" rel="noreferrer">${esc(ctxLabel)}</a>`
       : `<span class="mono">${esc(ctxLabel)}</span>`;
 
@@ -103,28 +104,33 @@ function renderProcesses(payload) {
 
     const proxiedPath = p.proxyEndpointPrefix ?? "";
     const proxiedCell = proxiedPath
-      ? `<a class="mono" href="${esc(proxiedPath)
+      ? `<a class="mono" href="${
+        esc(proxiedPath)
       }" target="_blank" rel="noreferrer">${esc(proxiedPath)}</a>`
       : `<span class="mono"></span>`;
 
     const svcLabel = serviceId || "(unknown)";
     const svcTitle = sessionId ? `sessionId=${sessionId}` : "";
-    const serviceCell = `<span class="mono" title="${esc(svcTitle)}">${esc(svcLabel)
-      }</span>`;
+    const serviceCell = `<span class="mono" title="${esc(svcTitle)}">${
+      esc(svcLabel)
+    }</span>`;
 
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td class="mono">${esc(pid)}</td>
-      <td class="mono"><a href="${esc(upstreamUrl)
-      }" target="_blank" rel="noreferrer">${esc(upstreamUrl)}</a></td>
+      <td class="mono"><a href="${
+      esc(upstreamUrl)
+    }" target="_blank" rel="noreferrer">${esc(upstreamUrl)}</a></td>
       <td class="mono">${proxiedCell}</td>
       <td>${serviceCell}</td>
       <td>${ledgerCell}</td>
       <td class="actions">
-        <a class="btnlink" href="${esc(stdoutHref || "#")
-      }" target="_blank" rel="noreferrer">STDOUT</a>
-        <a class="btnlink" href="${esc(stderrHref || "#")
-      }" target="_blank" rel="noreferrer">STDERR</a>
+        <a class="btnlink" href="${
+      esc(stdoutHref || "#")
+    }" target="_blank" rel="noreferrer">STDOUT</a>
+        <a class="btnlink" href="${
+      esc(stderrHref || "#")
+    }" target="_blank" rel="noreferrer">STDERR</a>
       </td>
     `;
     procTbody.appendChild(tr);
@@ -138,7 +144,8 @@ function renderReconcile(payload) {
 
   reconcileStatusText.textContent = ok
     ? `Reconcile: OK | Updated ${now} | ledgerDir=${ledgerDir}`
-    : `Reconcile: discrepancies | Updated ${now} | ledgerDir=${ledgerDir} | processWithoutLedger=${summary?.processWithoutLedger ?? "?"
+    : `Reconcile: discrepancies | Updated ${now} | ledgerDir=${ledgerDir} | processWithoutLedger=${
+      summary?.processWithoutLedger ?? "?"
     } ledgerWithoutProcess=${summary?.ledgerWithoutProcess ?? "?"}`;
 
   reconcileTbody.innerHTML = "";
@@ -175,18 +182,26 @@ function renderReconcile(payload) {
     }
 
     const ctxLink = href
-      ? `<a class="mono" href="${esc(href)}" target="_blank" rel="noreferrer">${esc(rel || path)}</a>`
+      ? `<a class="mono" href="${esc(href)}" target="_blank" rel="noreferrer">${
+        esc(rel || path)
+      }</a>`
       : `<span class="mono">${esc(rel || path)}</span>`;
 
     const stdoutIcon = stdoutHref
-      ? `<a class="icon-link" title="STDOUT" href="${esc(stdoutHref)}" target="_blank" rel="noreferrer">📄</a>`
+      ? `<a class="icon-link" title="STDOUT" href="${
+        esc(stdoutHref)
+      }" target="_blank" rel="noreferrer">📄</a>`
       : "";
 
     const stderrIcon = stderrHref
-      ? `<a class="icon-link" title="STDERR" href="${esc(stderrHref)}" target="_blank" rel="noreferrer">⚠️</a>`
+      ? `<a class="icon-link" title="STDERR" href="${
+        esc(stderrHref)
+      }" target="_blank" rel="noreferrer">⚠️</a>`
       : "";
 
-    const pathCell = `${ctxLink}${stdoutIcon ? " " + stdoutIcon : ""}${stderrIcon ? " " + stderrIcon : ""}`;
+    const pathCell = `${ctxLink}${stdoutIcon ? " " + stdoutIcon : ""}${
+      stderrIcon ? " " + stderrIcon : ""
+    }`;
 
     const tr = document.createElement("tr");
     tr.innerHTML = `
@@ -214,8 +229,9 @@ function renderProxyTable(payload) {
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td class="mono">${esc(r.basePath)}</td>
-      <td class="mono"><a href="${esc(r.upstreamUrl)
-      }" target="_blank" rel="noreferrer">${esc(r.upstreamUrl)}</a></td>
+      <td class="mono"><a href="${
+      esc(r.upstreamUrl)
+    }" target="_blank" rel="noreferrer">${esc(r.upstreamUrl)}</a></td>
     `;
     proxyTbody.appendChild(tr);
   }
@@ -239,8 +255,9 @@ function renderHealth(payload) {
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td class="mono">${esc(r.basePath)}</td>
-      <td class="mono"><a href="${esc(r.upstreamUrl)
-      }" target="_blank" rel="noreferrer">${esc(r.upstreamUrl)}</a></td>
+      <td class="mono"><a href="${
+      esc(r.upstreamUrl)
+    }" target="_blank" rel="noreferrer">${esc(r.upstreamUrl)}</a></td>
       <td class="mono">${esc(r.ok)}</td>
       <td class="mono">${esc(r.status ?? "")}</td>
       <td class="mono">${esc(r.ms ?? "")}</td>
@@ -260,8 +277,9 @@ async function refreshProcesses() {
     const payload = await res.json();
     renderProcesses(payload);
   } catch (e) {
-    procStatusText.textContent = `Processes: failed to load: ${e?.message ?? e
-      }`;
+    procStatusText.textContent = `Processes: failed to load: ${
+      e?.message ?? e
+    }`;
     if (lastPayload) renderProcesses(lastPayload);
   }
 }
@@ -290,8 +308,9 @@ async function loadProxyTable() {
     const payload = await res.json();
     renderProxyTable(payload);
   } catch (e) {
-    proxyConflictsText.textContent = `Proxy conflicts: failed: ${e?.message ?? e
-      }`;
+    proxyConflictsText.textContent = `Proxy conflicts: failed: ${
+      e?.message ?? e
+    }`;
   }
 }
 
