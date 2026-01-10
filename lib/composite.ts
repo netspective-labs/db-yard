@@ -360,12 +360,10 @@ export async function compose<TMeta = unknown>(args: {
 
   if (emitter.header) push(emitter.header(ctx));
   for (const db of dbs) {
-    const stmt = emitter.attach
-      ? emitter.attach(db, ctx)
-      : emitAttach(
-        db as unknown as DiscoveredDb<Any>,
-        ctx as unknown as ComposeContext<Any>,
-      );
+    const stmt = emitter.attach ? emitter.attach(db, ctx) : emitAttach(
+      db as unknown as DiscoveredDb<Any>,
+      ctx as unknown as ComposeContext<Any>,
+    );
     push(stmt);
   }
   if (emitter.footer) push(emitter.footer(ctx));
