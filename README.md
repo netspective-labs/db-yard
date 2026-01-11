@@ -1,7 +1,7 @@
 ![db-yard Logo](project-hero.png)
 
-`db-yard` is a file-driven process yard for “database cargo.” It treats your
-filesystem as the control plane. You drop databases into a cargo directory, and
+`db-yard` is a file-driven process yard for Operational Truth “database cargo”. It treats your
+filesystem as the control plane. You drop Operational Truth and _evidence warehouse_ databases into a cargo directory, and
 db-yard discovers, classifies, spawns, supervises, and exposes them as local web
 services using deterministic, inspectable state written entirely to disk.
 
