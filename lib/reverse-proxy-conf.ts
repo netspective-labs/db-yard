@@ -177,6 +177,86 @@ ${hdrs}  }${extraBlock}}
 `;
 }
 
+function nginxLocationBlockFromState(
+  s: SpawnedState,
+  overrides: ProxyConfOverrides = {},
+): string {
+  const id = stateId(s);
+  const kind = stateKind(s);
+  const dbPath = stateDbPath(s);
+  const upstream = upstreamFromState(s);
+
+  const locationPrefix = overrides.nginx?.locationPrefix ??
+    defaultLocationPrefixFromState(s);
+
+  const stripPrefix = overrides.nginx?.stripPrefix ?? false;
+
+  const name = safeFileName(id);
+  const hash = fnv1a32Hex(id);
+
+  const lp = ensureTrailingSlash(locationPrefix).replaceAll(/\/+/g, "/");
+
+  const rewriteLine = stripPrefix
+    ? `    rewrite ^${escapeForNginxRegexPrefix(lp)}(.*)$ /$1 break;\n`
+    : "";
+
+  const hdrs = buildNginxDbYardHeaders({
+    id,
+    dbPath,
+    kind,
+    pid: s.pid,
+    upstream,
+    proxyPrefix: lp,
+  });
+
+  return `  # db-yard nginx reverse proxy (generated)
+  # id=${id}
+  # db=${dbPath}
+  # kind=${kind}
+  # pid=${s.pid}
+  # upstream=${upstream}
+  # proxyPrefix=${lp}
+
+  # Suggested include filename:
+  #   db-yard.${name}.${hash}.conf
+
+  location ${lp} {
+${rewriteLine}    proxy_pass ${upstream};
+    proxy_http_version 1.1;
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+${hdrs}  }
+  `;
+}
+
+export function nginxBundledReverseProxyConf(
+  states: SpawnedState[],
+  overrides: ProxyConfOverrides = {},
+): string {
+  if (states.length === 0) return "";
+
+  const serverName = overrides.nginx?.serverName ?? "_";
+  const listen = overrides.nginx?.listen ?? "80";
+  const extra = overrides.nginx?.extra ?? "";
+  const extraBlock = extra.trim() ? `\n${extra.trimEnd()}\n` : "";
+
+  const locationBlocks = states
+    .map((s) => nginxLocationBlockFromState(s, overrides))
+    .join("\n");
+
+  return `server {
+  listen ${listen};
+  server_name ${serverName};
+
+${locationBlocks}
+}
+${extraBlock}`;
+}
+
 export function traefikReverseProxyConfFromState(
   s: SpawnedState,
   overrides: ProxyConfOverrides = {},
@@ -288,10 +368,7 @@ export async function generateReverseProxyConfsFromSpawnedStates(args: {
       );
     }
 
-    const bundle = states.map((s) =>
-      nginxReverseProxyConfFromState(s, overrides)
-    )
-      .join("\n");
+    const bundle = nginxBundledReverseProxyConf(states, overrides);
     await writeTextAtomic(`${dir}/db-yard.generated.conf`, bundle);
 
     if (args.verbose) {
@@ -328,10 +405,6 @@ export async function generateReverseProxyConfsFromSpawnedStates(args: {
   }
 
   if (!args.nginxConfHome && !args.traefikConfHome) {
-    console.log(
-      states.map((s) => nginxReverseProxyConfFromState(s, overrides)).join(
-        "\n",
-      ),
-    );
+    console.log(nginxBundledReverseProxyConf(states, overrides));
   }
 }
