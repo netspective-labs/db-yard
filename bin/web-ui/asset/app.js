@@ -58,7 +58,7 @@ function stripLedgerPrefix(ledgerDirAbs, p) {
 
 function ledgerHref(rel) {
   const r = toPosix(rel || "").replace(/^\/+/, "");
-  return r ? `/.db-yard/ledger.d/${r}` : "";
+  return r ? `/.truth-yard/ledger.d/${r}` : "";
 }
 
 function deriveLogRel(relContextJson, which /* "stdout" | "stderr" */) {
@@ -270,7 +270,7 @@ function renderHealth(payload) {
 async function refreshProcesses() {
   try {
     procStatusText.textContent = "Processes: loading…";
-    const res = await fetch("/.db-yard/api/tagged-processes.json", {
+    const res = await fetch("/.truth-yard/api/tagged-processes.json", {
       cache: "no-store",
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -287,7 +287,7 @@ async function refreshProcesses() {
 async function runReconcile() {
   try {
     reconcileStatusText.textContent = "Reconcile: running…";
-    const res = await fetch("/.db-yard/api/reconcile.json", {
+    const res = await fetch("/.truth-yard/api/reconcile.json", {
       cache: "no-store",
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -301,7 +301,7 @@ async function runReconcile() {
 async function loadProxyTable() {
   try {
     proxyConflictsText.textContent = "Proxy conflicts: loading…";
-    const res = await fetch("/.db-yard/api/proxy-table.json", {
+    const res = await fetch("/.truth-yard/api/proxy-table.json", {
       cache: "no-store",
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -320,7 +320,7 @@ async function resolveProxy() {
 
   try {
     const res = await fetch(
-      `/.db-yard/api/proxy-resolve.json?path=${encodeURIComponent(p)}`,
+      `/.truth-yard/api/proxy-resolve.json?path=${encodeURIComponent(p)}`,
       {
         cache: "no-store",
       },
@@ -342,9 +342,12 @@ async function resolveProxy() {
 
 async function runHealth() {
   try {
-    const res = await fetch("/.db-yard/api/health.json?timeoutMs=1500&max=50", {
-      cache: "no-store",
-    });
+    const res = await fetch(
+      "/.truth-yard/api/health.json?timeoutMs=1500&max=50",
+      {
+        cache: "no-store",
+      },
+    );
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const payload = await res.json();
     renderHealth(payload);

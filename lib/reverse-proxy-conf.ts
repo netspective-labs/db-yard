@@ -85,7 +85,7 @@ function upstreamFromState(s: SpawnedState): string {
 
 function nginxHeaderLine(name: string, value: string | number): string {
   // keep header names stable and explicit
-  return `    proxy_set_header X-DB-Yard-${name} "${String(value)}";\n`;
+  return `    proxy_set_header X-Truth-Yard-${name} "${String(value)}";\n`;
 }
 
 function buildNginxDbYardHeaders(args: {
@@ -149,7 +149,7 @@ export function nginxReverseProxyConfFromState(
     proxyPrefix: lp,
   });
 
-  return `# db-yard nginx reverse proxy (generated)
+  return `# Truth Yard nginx reverse proxy (generated)
 # id=${id}
 # db=${dbPath}
 # kind=${kind}
@@ -158,7 +158,7 @@ export function nginxReverseProxyConfFromState(
 # proxyPrefix=${lp}
 
 # Suggested include filename:
-#   db-yard.${name}.${hash}.conf
+#   truth-yard.${name}.${hash}.conf
 
 server {
   listen ${listen};
@@ -209,7 +209,7 @@ function nginxLocationBlockFromState(
     proxyPrefix: lp,
   });
 
-  return `  # db-yard nginx reverse proxy (generated)
+  return `  # Truth Yard nginx reverse proxy (generated)
   # id=${id}
   # db=${dbPath}
   # kind=${kind}
@@ -218,7 +218,7 @@ function nginxLocationBlockFromState(
   # proxyPrefix=${lp}
 
   # Suggested include filename:
-  #   db-yard.${name}.${hash}.conf
+  #   truth-yard.${name}.${hash}.conf
 
   location ${lp} {
 ${rewriteLine}    proxy_pass ${upstream};
@@ -286,7 +286,7 @@ export function traefikReverseProxyConfFromState(
   const name = safeFileName(id);
   const hash = fnv1a32Hex(id);
 
-  const routerName = `db-yard-${name}-${hash}`;
+  const routerName = `truth-yard-${name}-${hash}`;
   const serviceName = `svc-${name}-${hash}`;
   const mwStripName = `mw-strip-${name}-${hash}`;
   const mwHdrName = `mw-hdr-${name}-${hash}`;
@@ -296,12 +296,12 @@ export function traefikReverseProxyConfFromState(
     ${mwHdrName}:
       headers:
         customRequestHeaders:
-          X-DB-Yard-Id: "${yamlEscape(id)}"
-          X-DB-Yard-Db: "${yamlEscape(dbPath)}"
-          X-DB-Yard-Kind: "${yamlEscape(kind)}"
-          X-DB-Yard-Pid: "${yamlEscape(String(s.pid))}"
-          X-DB-Yard-Upstream: "${yamlEscape(url)}"
-          X-DB-Yard-ProxyPrefix: "${yamlEscape(lpNoTrail + "/")}"${
+          X-Truth-Yard-Id: "${yamlEscape(id)}"
+          X-Truth-Yard-Db: "${yamlEscape(dbPath)}"
+          X-Truth-Yard-Kind: "${yamlEscape(kind)}"
+          X-Truth-Yard-Pid: "${yamlEscape(String(s.pid))}"
+          X-Truth-Yard-Upstream: "${yamlEscape(url)}"
+          X-Truth-Yard-ProxyPrefix: "${yamlEscape(lpNoTrail + "/")}"${
     stripPrefix
       ? `
     ${mwStripName}:
@@ -318,7 +318,7 @@ export function traefikReverseProxyConfFromState(
 
   const extraBlock = extraYaml.trim() ? `\n${extraYaml.trimEnd()}\n` : "";
 
-  return `# db-yard traefik dynamic config (generated)
+  return `# Truth Yard traefik dynamic config (generated)
 # id=${id}
 # db=${dbPath}
 # kind=${kind}
@@ -361,7 +361,7 @@ export async function generateReverseProxyConfsFromSpawnedStates(args: {
 
     for (const s of states) {
       const id = stateId(s);
-      const fn = `db-yard.${safeFileName(id)}.conf`;
+      const fn = `truth-yard.${safeFileName(id)}.conf`;
       await writeTextAtomic(
         `${dir}/${fn}`,
         nginxReverseProxyConfFromState(s, overrides),
@@ -369,11 +369,11 @@ export async function generateReverseProxyConfsFromSpawnedStates(args: {
     }
 
     const bundle = nginxBundledReverseProxyConf(states, overrides);
-    await writeTextAtomic(`${dir}/db-yard.generated.conf`, bundle);
+    await writeTextAtomic(`${dir}/truth-yard.generated.conf`, bundle);
 
     if (args.verbose) {
       console.log(
-        `[spawned] wrote nginx conf(s) to: ${dir} (and db-yard.generated.conf)`,
+        `[spawned] wrote nginx conf(s) to: ${dir} (and truth-yard.generated.conf)`,
       );
     }
   }
@@ -384,7 +384,7 @@ export async function generateReverseProxyConfsFromSpawnedStates(args: {
 
     for (const s of states) {
       const id = stateId(s);
-      const fn = `db-yard.${safeFileName(id)}.yaml`;
+      const fn = `truth-yard.${safeFileName(id)}.yaml`;
       await writeTextAtomic(
         `${dir}/${fn}`,
         traefikReverseProxyConfFromState(s, overrides),
@@ -395,11 +395,11 @@ export async function generateReverseProxyConfsFromSpawnedStates(args: {
       traefikReverseProxyConfFromState(s, overrides)
     )
       .join("\n");
-    await writeTextAtomic(`${dir}/db-yard.generated.yaml`, bundle);
+    await writeTextAtomic(`${dir}/truth-yard.generated.yaml`, bundle);
 
     if (args.verbose) {
       console.log(
-        `[spawned] wrote traefik conf(s) to: ${dir} (and db-yard.generated.yaml)`,
+        `[spawned] wrote traefik conf(s) to: ${dir} (and truth-yard.generated.yaml)`,
       );
     }
   }

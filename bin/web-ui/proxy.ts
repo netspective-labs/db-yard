@@ -99,15 +99,15 @@ function headersToObject(h: Headers, opts?: { redact?: boolean }) {
 
 function traceRequested(c: Context) {
   const u = new URL(c.req.url);
-  if (u.searchParams.get("__db_yard_trace") === "1") return true;
-  const hv = c.req.header("x-db-yard-trace");
+  if (u.searchParams.get("__truth_yard_trace") === "1") return true;
+  const hv = c.req.header("x-truth-yard-trace");
   if (!hv) return false;
   return hv === "1" || hv.toLowerCase() === "true" ||
     hv.toLowerCase() === "yes";
 }
 
 function getOrMakeTraceId(c: Context) {
-  const provided = c.req.header("x-db-yard-trace-id");
+  const provided = c.req.header("x-truth-yard-trace-id");
   return (provided && provided.trim()) ? provided.trim() : crypto.randomUUID();
 }
 
@@ -121,12 +121,12 @@ function applyTraceHeaders(
   },
 ) {
   const out = new Headers(resp.headers);
-  out.set("x-db-yard-trace-id", trace.traceId);
+  out.set("x-truth-yard-trace-id", trace.traceId);
   if (trace.matchedBasePath) {
-    out.set("x-db-yard-matched-basepath", trace.matchedBasePath);
+    out.set("x-truth-yard-matched-basepath", trace.matchedBasePath);
   }
-  if (trace.upstreamUrl) out.set("x-db-yard-upstream", trace.upstreamUrl);
-  if (trace.rest) out.set("x-db-yard-rest", trace.rest);
+  if (trace.upstreamUrl) out.set("x-truth-yard-upstream", trace.upstreamUrl);
+  if (trace.rest) out.set("x-truth-yard-rest", trace.rest);
 
   return new Response(resp.body, {
     status: resp.status,
@@ -294,7 +294,7 @@ export function registerProxyApiRoutes(deps: ProxyDeps) {
       inboundHeaders: inbound,
       forwardedHeaders: forwarded,
       note:
-        "Headers are redacted for safety. This shows what db-yard received and what it will forward upstream.",
+        "Headers are redacted for safety. This shows what Truth Yard received and what it will forward upstream.",
     });
   });
 
@@ -371,9 +371,9 @@ export function registerProxyApiRoutes(deps: ProxyDeps) {
     return c.json({
       ok: true,
       howTo: [
-        "Add ?__db_yard_trace=1 to any proxied request URL, OR send header: x-db-yard-trace: 1",
-        "db-yard will add response headers like x-db-yard-trace-id, x-db-yard-matched-basepath, x-db-yard-upstream, x-db-yard-rest",
-        "Use x-db-yard-trace-id to correlate with server logs (one JSON line per traced request).",
+        "Add ?__truth_yard_trace=1 to any proxied request URL, OR send header: x-truth-yard-trace: 1",
+        "Truth Yard will add response headers like x-truth-yard-trace-id, x-truth-yard-matched-basepath, x-truth-yard-upstream, x-truth-yard-rest",
+        "Use x-truth-yard-trace-id to correlate with server logs (one JSON line per traced request).",
       ],
       redaction: [...REDACT.values()],
     });

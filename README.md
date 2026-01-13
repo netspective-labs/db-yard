@@ -1,14 +1,25 @@
 ![Operational Truth Yard Logo](project-hero.png)
 
-Operational Truth Yard (`OTY`) is a file driven process yard for _operational truth_ data cargo. It treats your filesystem as the control plane. You drop evidence warehouse databases into a cargo directory, and Truth Yard discovers, classifies, spawns, supervises, and exposes them as local web services using deterministic, inspectable state written entirely to disk.
+Operational Truth Yard (`OTY`) is a file driven process yard for _operational
+truth_ data cargo. It treats your filesystem as the control plane. You drop
+evidence warehouse databases into a cargo directory, and Truth Yard discovers,
+classifies, spawns, supervises, and exposes them as local web services using
+deterministic, inspectable state written entirely to disk.
 
-There is no registry, no background daemon requirement, and no internal control plane database. Everything Truth Yard knows is encoded in files you can read, version, copy, audit, or generate tooling around.
+There is no registry, no background daemon requirement, and no internal control
+plane database. Everything Truth Yard knows is encoded in files you can read,
+version, copy, audit, or generate tooling around.
 
 ## Mental model: a Navy Yard
 
-A database file on disk is cargo. This includes SQLite, DuckDB, Excel, Markdown and other data suppliers and artifacts now and in the future.
+A database file on disk is cargo. This includes SQLite, DuckDB, Excel, Markdown
+and other data suppliers and artifacts now and in the future.
 
-Dropping cargo into the yard, the `./cargo.d` directory, makes it eligible to be launched. The spawn state directory is the operational ledger. JSON context manifests and logs are written to disk so other tools, scripts, reverse proxies, and later invocations of `yard.ts` can see what is running without needing an API.
+Dropping cargo into the yard, the `./cargo.d` directory, makes it eligible to be
+launched. The spawn state directory is the operational ledger. JSON context
+manifests and logs are written to disk so other tools, scripts, reverse proxies,
+and later invocations of `yard.ts` can see what is running without needing an
+API.
 
 The filesystem is the API.
 
@@ -19,7 +30,10 @@ The filesystem is the API.
 - JSON context files are manifests you can hand to other tools.
 - The `ledger.d` directory is the ship’s log.
 
-This framing is intentional. Truth Yard is not an app server or an orchestrator in the Kubernetes sense. It is closer to a dockyard that launches things predictably and writes down exactly what it did, forming an inspectable, auditable record of operational truth.
+This framing is intentional. Truth Yard is not an app server or an orchestrator
+in the Kubernetes sense. It is closer to a dockyard that launches things
+predictably and writes down exactly what it did, forming an inspectable,
+auditable record of operational truth.
 
 ## What Truth Yard supports
 
@@ -28,8 +42,9 @@ Today, `OTY` focuses on local-first, deterministic process orchestration for:
 - SQLPage applications stored inside SQLite databases
 - surveilr RSSDs (SQLite databases with `uniform_resource` tables)
 
-Other tabular formats such as DuckDB, Markdown or Excel may be discovered as cargo but are
-not currently exposable services. Please create tickets to accelerate our roadmap for the data suppliers you're interested in.
+Other tabular formats such as DuckDB, Markdown or Excel may be discovered as
+cargo but are not currently exposable services. Please create tickets to
+accelerate our roadmap for the data suppliers you're interested in.
 
 ## High-level workflows
 
@@ -50,8 +65,8 @@ bin/yard.ts start
 
 ### 2. Continuous watch and reconcile
 
-The `yard` command can run continuously. The filesystem is watched and operational truth is
-reconciled to intent.
+The `yard` command can run continuously. The filesystem is watched and
+operational truth is reconciled to intent.
 
 - New cargo appears: spawned
 - Cargo disappears: killed
@@ -73,8 +88,8 @@ reconciles it instead of producing a one-shot session.
 
 ### Discovery
 
-The `yard` command recursively walks one or more cargo roots using deterministic glob
-rules.
+The `yard` command recursively walks one or more cargo roots using deterministic
+glob rules.
 
 Typical defaults include:
 
@@ -120,8 +135,8 @@ used by the web UI, and consumed by reverse proxy generators.
 
 Ports are assigned incrementally starting at a configurable base (default 3000).
 
-`OTY` automatically skips ports that are already in use and continues
-searching until a free port is found. This behavior is enabled by default.
+`OTY` automatically skips ports that are already in use and continues searching
+until a free port is found. This behavior is enabled by default.
 
 In watch and smart-spawn modes, `OTY` also avoids collisions by inspecting the
 existing ledger and live processes.
@@ -230,8 +245,8 @@ flags.
 ## Composite Connections
 
 `OTY` includes a deterministic composite SQL DDL generator for "virtual
-aggregation" of multiple embedded databases (like SQLite, Excel, etc.) in a single connection
-using DuckDB as the federated query layer.
+aggregation" of multiple embedded databases (like SQLite, Excel, etc.) in a
+single connection using DuckDB as the federated query layer.
 
 Most composites are executed against an ephemeral database (often `:memory:` for
 SQLite, or an in-memory DuckDB connection) when you only need a transient
@@ -251,13 +266,13 @@ case:
 
 ```bash
 # SQLite SQL DDL for composite connections in admin scope (default)
-./bin/yard.ts cc --volume-root /var/db-yard --scope admin
+./bin/yard.ts cc --volume-root /var/truth-yard --scope admin
 
 # Tenant SQL DDL for composite connections
-./bin/yard.ts cc --volume-root /var/db-yard --scope tenant --tenant-id tenant-123
+./bin/yard.ts cc --volume-root /var/truth-yard --scope tenant --tenant-id tenant-123
 
 # DuckDB SQL DDL for composite connections that can attach SQLite DBs (includes INSTALL/LOAD sqlite preamble)
-./bin/yard.ts cc --dialect DuckDB --duckdb-sqlite-ext --volume-root /var/db-yard --scope cross-tenant
+./bin/yard.ts cc --dialect DuckDB --duckdb-sqlite-ext --volume-root /var/truth-yard --scope cross-tenant
 ```
 
 ## Web UI
@@ -279,7 +294,7 @@ http://127.0.0.1:8787/
 The root URL redirects automatically to:
 
 ```
-/.db-yard/ui/
+/.truth-yard/ui/
 ```
 
 ### Running Services
@@ -319,23 +334,24 @@ the browser, including context files and logs.
 
 The UI and API expose explicit debug endpoints to understand proxy behavior:
 
-- `/.db-yard/api/proxy-debug.json?path=/some/path` Shows which proxy rule
+- `/.truth-yard/api/proxy-debug.json?path=/some/path` Shows which proxy rule
   matched, how the upstream URL is constructed, and which headers are forwarded
   (with secrets redacted).
 
-- `/.db-yard/api/proxy-roundtrip.json?path=/some/path` Performs a real upstream
-  request and reports status, headers, latency, and a small response preview.
+- `/.truth-yard/api/proxy-roundtrip.json?path=/some/path` Performs a real
+  upstream request and reports status, headers, latency, and a small response
+  preview.
 
 You can also trace any proxied request end-to-end by adding:
 
 ```env
-?__db_yard_trace=1
+?__truth_yard_trace=1
 ```
 
 or sending the header:
 
 ```yaml
-x-db-yard-trace: 1
+x-truth-yard-trace: 1
 ```
 
 The response will include trace headers showing the matched base path and

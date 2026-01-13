@@ -23,21 +23,21 @@ import { registerCatchAllProxy, registerProxyApiRoutes } from "./proxy.ts";
 
 async function main() {
   const cmd = await new Command()
-    .name("db-yard-web-ui")
+    .name("truth-yard-web-ui")
     .description(
-      "db-yard web UI + ledger browser + simple proxy to tagged processes",
+      "Operational Truth Yard web UI + ledger browser + simple proxy to tagged processes",
     )
     .option("--host <host:string>", "Host to bind", { default: "127.0.0.1" })
     .option("--port <port:number>", "Port to listen on", { default: 8787 })
     .option(
       "--ledger-dir <path:string>",
-      "Path to the db-yard ledger directory (ledger.d parent)",
+      "Path to the Truth Yard ledger directory (ledger.d parent)",
       { default: "./ledger.d" },
     )
     .option("--assets-dir <path:string>", "Path to assets directory", {
       default: "bin/web-ui/asset",
     })
-    .option("--no-proxy", "Disable proxy behavior for non /.db-yard paths", {
+    .option("--no-proxy", "Disable proxy behavior for non /.truth-yard paths", {
       default: false,
     })
     .option(

@@ -100,7 +100,7 @@ function mkStatePaths(tag: string): {
   ) => string | undefined;
 } {
   const enabled = Deno.env.get("TEST_SPAWN_LOGS") === "1";
-  const dir = Deno.makeTempDirSync({ prefix: `db-yard-spawn-test-${tag}-` });
+  const dir = Deno.makeTempDirSync({ prefix: `truth-yard-spawn-test-${tag}-` });
 
   const spawnStatePath = (
     entry: ExposableService,

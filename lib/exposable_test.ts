@@ -83,7 +83,7 @@ function logTargetsForTest(tag: string): {
   const enabled = Deno.env.get("TEST_SPAWN_LOGS") === "1";
   if (!enabled) return {};
 
-  const dir = Deno.makeTempDirSync({ prefix: "db-yard-exposable-test-" });
+  const dir = Deno.makeTempDirSync({ prefix: "truth-yard-exposable-test-" });
   return {
     stdout: join(dir, `${tag}.stdout.log`),
     stderr: join(dir, `${tag}.stderr.log`),

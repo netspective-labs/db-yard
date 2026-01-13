@@ -703,7 +703,7 @@ export async function* spawn(
 export type TaggedProcess = Readonly<{
   pid: number;
 
-  // Always sourced from env tags (source of truth for “owned by db-yard”)
+  // Always sourced from env tags (source of truth for “owned by Truth Yard”)
   provenance: string;
   contextPath: string;
   sessionId: string;
@@ -726,7 +726,7 @@ export type TaggedProcess = Readonly<{
 }>;
 
 /**
- * Linux-only: yield all processes "owned" by db-yard using env tags:
+ * Linux-only: yield all processes "owned" by Truth Yard using env tags:
  * - DB_YARD_PROVENANCE
  * - DB_YARD_CONTEXT_PATH
  * - DB_YARD_SESSION_ID

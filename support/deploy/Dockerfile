@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 #
-# db-yard container (Debian “mini” base)
+# Operational Truth Yard container (Debian “mini” base)
 #
 # HTTPS + CNAME (example eg.surveilr.com):
 # - DNS: create a CNAME eg.surveilr.com -> your public host name (or A/AAAA to server IP).
@@ -24,11 +24,11 @@ ENV DENO_VERSION=2.6.3
 ENV DENO_INSTALL=/opt/deno
 ENV PATH=/opt/deno/bin:${PATH}
 
-# ---- db-yard defaults --------------------------------------------------------
+# ---- truth-yard defaults --------------------------------------------------------
 ENV DB_YARD_VERSION=v0.6.0
 ENV DB_YARD_WEB_UI_PORT=8787
-ENV DB_YARD_BIN=https://raw.githubusercontent.com/netspective-labs/db-yard/refs/tags/${DB_YARD_VERSION}/bin/yard.ts
-ENV DB_YARD_WEB_UI_BIN=https://raw.githubusercontent.com/netspective-labs/db-yard/refs/tags/${DB_YARD_VERSION}/bin/web-ui/serve.ts
+ENV DB_YARD_BIN=https://raw.githubusercontent.com/netspective-labs/truth-yard/refs/tags/${DB_YARD_VERSION}/bin/yard.ts
+ENV DB_YARD_WEB_UI_BIN=https://raw.githubusercontent.com/netspective-labs/truth-yard/refs/tags/${DB_YARD_VERSION}/bin/web-ui/serve.ts
 
 # ---- Base deps ---------------------------------------------------------------
 RUN apt-get update \
@@ -63,11 +63,11 @@ WORKDIR /work
 # Expect caller to mount /work/cargo.d; `yard.ts start` will create ledger.d.
 VOLUME ["/work/cargo.d"]
 
-RUN cat > /usr/local/bin/db-yard-entrypoint.sh <<'EOF' \
+RUN cat > /usr/local/bin/truth-yard-entrypoint.sh <<'EOF' \
 #!/usr/bin/env sh
 set -eu
 
-# Start db-yard (background) directly from tagged URL
+# Start truth-yard (background) directly from tagged URL
 deno run -A "${DB_YARD_BIN}" start &
 
 # Allow initialization time
@@ -76,6 +76,6 @@ sleep 5
 # Start web UI (foreground) directly from tagged URL
 exec deno run -A "${DB_YARD_WEB_UI_BIN}" --port "${DB_YARD_WEB_UI_PORT}"
 EOF
- && chmod +x /usr/local/bin/db-yard-entrypoint.sh
+ && chmod +x /usr/local/bin/truth-yard-entrypoint.sh
 
-ENTRYPOINT ["/usr/local/bin/db-yard-entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/truth-yard-entrypoint.sh"]

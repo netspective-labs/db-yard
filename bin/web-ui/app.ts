@@ -154,7 +154,7 @@ export function renderDirListing(params: {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>db-yard ledger browser</title>
+  <title>Truth Yard ledger browser</title>
 </head>
 <body>
   <div>${crumbs}</div>
@@ -304,7 +304,7 @@ export function registerLedgerBrowser(deps: SharedDeps) {
 /* ---------------- wiring helpers ---------------- */
 
 export function computeMounts(): Mounts {
-  const mount = "/.db-yard";
+  const mount = "/.truth-yard";
   return {
     mount,
     assetsMount: `${mount}/asset`,
@@ -329,7 +329,9 @@ export async function requireDir(path: string) {
 }
 
 export function logStartup(cfg: AppCfg, mounts: Mounts) {
-  console.log(`db-yard web-ui listening on http://${cfg.host}:${cfg.port}`);
+  console.log(
+    `Operational Truth Yard (OTY) web-ui listening on http://${cfg.host}:${cfg.port}`,
+  );
   console.log(`UI: http://${cfg.host}:${cfg.port}${mounts.uiMount}/`);
   console.log(`Assets: http://${cfg.host}:${cfg.port}${mounts.assetsMount}/`);
   console.log(

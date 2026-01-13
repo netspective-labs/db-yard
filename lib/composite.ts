@@ -1,7 +1,7 @@
 /**
  * @module lib/composite
  *
- * Deterministic composite SQL generator for db-yard embedded composite connections.
+ * Deterministic composite SQL generator for truth-yard embedded composite connections.
  *
  * This module discovers embedded database files using globs and generates a deterministic
  * `composite.sql` file containing:

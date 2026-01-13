@@ -1,9 +1,9 @@
 # SQLite Composite Connections
 
-db-yard is designed around embedded databases as evidence warehouses. Rather
-than forcing tenants into a single monolithic database, db-yard explicitly
-supports many small, purpose-built SQLite databases per tenant and per
-functional area such as evidence warehouses, Qualityfolio, Fleetfolio,
+Operational Truth Yard (`OTY`) is designed around embedded databases as evidence
+warehouses. Rather than forcing tenants into a single monolithic database, Truth
+Yard explicitly supports many small, purpose-built SQLite databases per tenant
+and per functional area such as evidence warehouses, Qualityfolio, Fleetfolio,
 telemetry, and other RSSD-style stores.
 
 This design is intentional. Customers are free to create new databases whenever
@@ -21,8 +21,8 @@ SQLite or DuckDB. They are file-based and accessed via local paths, not through
 a server process like PostgreSQL.
 
 Multiple databases per tenant Each tenant may have many SQLite databases. Some
-are created by db-yard components, others by customers themselves. There is no
-artificial requirement to consolidate them.
+are created by Truth Yard components, others by customers themselves. There is
+no artificial requirement to consolidate them.
 
 Composite databases A composite database is a thin SQLite or DuckDB database
 whose primary role is to ATTACH other databases and optionally define views
@@ -293,7 +293,7 @@ Recommended model:
 ## Summary
 
 The composite connection pattern is a foundational architectural element for
-db-yard surveilr:
+Truth Yard's `surveilr`:
 
 - Customers freely create multiple SQLite databases.
 - Composites provide a stable, simple connection surface.
