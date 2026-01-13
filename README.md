@@ -1,46 +1,35 @@
-![db-yard Logo](project-hero.png)
+![Operational Truth Yard Logo](project-hero.png)
 
-`db-yard` is a file-driven process yard for Operational Truth “database cargo”. It treats your
-filesystem as the control plane. You drop Operational Truth and _evidence warehouse_ databases into a cargo directory, and
-db-yard discovers, classifies, spawns, supervises, and exposes them as local web
-services using deterministic, inspectable state written entirely to disk.
+Operational Truth Yard (`OTY`) is a file driven process yard for _operational truth_ data cargo. It treats your filesystem as the control plane. You drop evidence warehouse databases into a cargo directory, and Truth Yard discovers, classifies, spawns, supervises, and exposes them as local web services using deterministic, inspectable state written entirely to disk.
 
-There is no registry, no background daemon requirement, and no internal
-control-plane database. Everything db-yard knows is encoded in files you can
-read, version, copy, audit, or generate tooling around.
+There is no registry, no background daemon requirement, and no internal control plane database. Everything Truth Yard knows is encoded in files you can read, version, copy, audit, or generate tooling around.
 
 ## Mental model: a Navy Yard
 
-A SQLite file on disk is cargo.
+A database file on disk is cargo. This includes SQLite, DuckDB, Excel, Markdown and other data suppliers and artifacts now and in the future.
 
-Dropping cargo into the "yard" (`./cargo.d` directory) makes it eligible to be
-launched. The spawn-state directory is the operational ledger. JSON context
-manifests and logs are written to disk so other tools, scripts, reverse proxies,
-and later invocations of `yard.ts` can see what is running without needing an
-API.
+Dropping cargo into the yard, the `./cargo.d` directory, makes it eligible to be launched. The spawn state directory is the operational ledger. JSON context manifests and logs are written to disk so other tools, scripts, reverse proxies, and later invocations of `yard.ts` can see what is running without needing an API.
 
 The filesystem is the API.
 
 - The yard is a place where cargo crates get launched as vessels.
-- Databases are cargo crates.
+- Databases and data files are cargo crates.
 - Spawned processes are launched vessels.
 - Ports are berths.
 - JSON context files are manifests you can hand to other tools.
 - The `ledger.d` directory is the ship’s log.
 
-This framing is intentional. db-yard is not an app server or orchestrator in the
-Kubernetes sense. It is closer to a dockyard that launches things predictably
-and writes down exactly what it did.
+This framing is intentional. Truth Yard is not an app server or an orchestrator in the Kubernetes sense. It is closer to a dockyard that launches things predictably and writes down exactly what it did, forming an inspectable, auditable record of operational truth.
 
-## What db-yard supports
+## What Truth Yard supports
 
-Today, db-yard focuses on local-first, deterministic process orchestration for:
+Today, `OTY` focuses on local-first, deterministic process orchestration for:
 
 - SQLPage applications stored inside SQLite databases
 - surveilr RSSDs (SQLite databases with `uniform_resource` tables)
 
-Other tabular formats such as DuckDB or Excel may be discovered as cargo but are
-not currently exposable services.
+Other tabular formats such as DuckDB, Markdown or Excel may be discovered as cargo but are
+not currently exposable services. Please create tickets to accelerate our roadmap for the data suppliers you're interested in.
 
 ## High-level workflows
 
@@ -61,7 +50,7 @@ bin/yard.ts start
 
 ### 2. Continuous watch and reconcile
 
-Run db-yard continuously. The filesystem is watched and operational truth is
+The `yard` command can run continuously. The filesystem is watched and operational truth is
 reconciled to intent.
 
 - New cargo appears: spawned
@@ -84,7 +73,7 @@ reconciles it instead of producing a one-shot session.
 
 ### Discovery
 
-db-yard recursively walks one or more cargo roots using deterministic glob
+The `yard` command recursively walks one or more cargo roots using deterministic glob
 rules.
 
 Typical defaults include:
@@ -131,10 +120,10 @@ used by the web UI, and consumed by reverse proxy generators.
 
 Ports are assigned incrementally starting at a configurable base (default 3000).
 
-db-yard automatically skips ports that are already in use and continues
+`OTY` automatically skips ports that are already in use and continues
 searching until a free port is found. This behavior is enabled by default.
 
-In watch and smart-spawn modes, db-yard also avoids collisions by inspecting the
+In watch and smart-spawn modes, `OTY` also avoids collisions by inspecting the
 existing ledger and live processes.
 
 ## Spawn-state ledger
@@ -240,9 +229,9 @@ flags.
 
 ## Composite Connections
 
-db-yard includes a deterministic composite SQL DDL generator for "virtual
-aggregation" of multiple embedded databases (like SQLite) in a single connection
-using [this strategy](support/rfc/composite.md).
+`OTY` includes a deterministic composite SQL DDL generator for "virtual
+aggregation" of multiple embedded databases (like SQLite, Excel, etc.) in a single connection
+using DuckDB as the federated query layer.
 
 Most composites are executed against an ephemeral database (often `:memory:` for
 SQLite, or an in-memory DuckDB connection) when you only need a transient
@@ -273,7 +262,7 @@ case:
 
 ## Web UI
 
-![db-yard Web UI Screenshot](project-screen.webp)
+![Operational Truth Web UI Screenshot](project-screen.webp)
 
 You can start a web-based administration server using:
 
@@ -295,13 +284,13 @@ The root URL redirects automatically to:
 
 ### Running Services
 
-This shows all currently tagged processes managed by db-yard.
+This shows all currently tagged processes managed by `OTY`.
 
 For each service you can see:
 
 - PID of the running process
 - Upstream URL (where the service actually listens)
-- Proxied URL (the local path exposed by db-yard)
+- Proxied URL (the local path exposed by `OTY`)
 - DB Yard Service (serviceId, with sessionId available via tooltip)
 - Ledger Context (link to the exact `*.context.json` file in `ledger.d`)
 - Actions to view STDOUT and STDERR logs
@@ -354,7 +343,7 @@ upstream, and the server logs a single structured trace line for correlation.
 
 ### About the built-in proxy
 
-The db-yard proxy is intentionally simple and transparent.
+The `OTY` proxy is intentionally simple and transparent.
 
 It’s ideal for:
 
@@ -367,7 +356,7 @@ It’s ideal for:
 For anything beyond that (higher traffic, TLS termination, auth, rate limiting,
 resilience, observability), you should point industrial-grade proxy servers such
 as NGINX, Traefik, Envoy, or cloud load balancers directly at the upstream URLs.
-db-yard can already generate proxy configuration inputs from ledger state to
+`OTY` can already generate proxy configuration inputs from ledger state to
 support that workflow.
 
 The design intent is clarity and debuggability first, not to replace production
