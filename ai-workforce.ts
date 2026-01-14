@@ -22,7 +22,7 @@ import { isAbsolute, normalize, relative, resolve } from "@std/path";
 //          (e.g., server-side only or browser-side only or just assurance)
 const FILES = [
   "README.md",
-  "deno.json",
+  "deno.jsonc",
   "./lib/discover.ts",
   "./lib/exposable.ts",
   "./lib/spawn-event.ts",
