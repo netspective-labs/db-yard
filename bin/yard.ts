@@ -405,6 +405,10 @@ await new Command()
     "--watch-strict-kills-only",
     "Watch mode: only kill processes from THIS watch loop session (Linux only)",
   )
+  .option(
+    "--start-port <port:number>",
+    "Starting port for upstream services (default 3000)",
+  )
   .action(
     async (
       {
@@ -417,12 +421,14 @@ await new Command()
         watchDebounceMs,
         watchStrictKillsOnly,
         listenHost,
+        startPort,
       },
     ) => {
       const optsBase = {
         verbose: verbose ? verbose : false,
         spawnedLedgerHome: ledgerHome,
         listenHost,
+        startPort,
       } as const;
 
       if (watch) {
