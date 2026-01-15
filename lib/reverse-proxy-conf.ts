@@ -132,7 +132,8 @@ export function nginxReverseProxyConfFromState(
   const name = safeFileName(id);
   const hash = fnv1a32Hex(id);
 
-  const lp = ensureTrailingSlash(locationPrefix).replaceAll(/\/+/g, "/");
+  const rawLp = ensureTrailingSlash(locationPrefix).replaceAll(/\/+/g, "/");
+  const lp = (rawLp === "/") ? "/" : trimTrailingSlashes(rawLp);
 
   const rewriteLine = stripPrefix
     ? `    rewrite ^${escapeForNginxRegexPrefix(lp)}(.*)$ /$1 break;\n`
@@ -146,7 +147,7 @@ export function nginxReverseProxyConfFromState(
     kind,
     pid: s.pid,
     upstream,
-    proxyPrefix: lp,
+    proxyPrefix: rawLp,
   });
 
   return `# Truth Yard nginx reverse proxy (generated)
@@ -155,7 +156,7 @@ export function nginxReverseProxyConfFromState(
 # kind=${kind}
 # pid=${s.pid}
 # upstream=${upstream}
-# proxyPrefix=${lp}
+# proxyPrefix=${rawLp}
 
 # Suggested include filename:
 #   truth-yard.${name}.${hash}.conf
@@ -194,7 +195,8 @@ function nginxLocationBlockFromState(
   const name = safeFileName(id);
   const hash = fnv1a32Hex(id);
 
-  const lp = ensureTrailingSlash(locationPrefix).replaceAll(/\/+/g, "/");
+  const rawLp = ensureTrailingSlash(locationPrefix).replaceAll(/\/+/g, "/");
+  const lp = (rawLp === "/") ? "/" : trimTrailingSlashes(rawLp);
 
   const rewriteLine = stripPrefix
     ? `    rewrite ^${escapeForNginxRegexPrefix(lp)}(.*)$ /$1 break;\n`
@@ -206,7 +208,7 @@ function nginxLocationBlockFromState(
     kind,
     pid: s.pid,
     upstream,
-    proxyPrefix: lp,
+    proxyPrefix: rawLp,
   });
 
   return `  # Truth Yard nginx reverse proxy (generated)
@@ -215,7 +217,7 @@ function nginxLocationBlockFromState(
   # kind=${kind}
   # pid=${s.pid}
   # upstream=${upstream}
-  # proxyPrefix=${lp}
+  # proxyPrefix=${rawLp}
 
   # Suggested include filename:
   #   truth-yard.${name}.${hash}.conf
@@ -251,6 +253,13 @@ export function nginxBundledReverseProxyConf(
   return `server {
   listen ${listen};
   server_name ${serverName};
+
+  root /var/www/html;
+  index index.html;
+
+  location / {
+    try_files $uri $uri/ =404;
+  }
 
 ${locationBlocks}
 }

@@ -76,6 +76,11 @@ export type MaterializeOptions = Readonly<{
   listenHost?: string;
 
   /**
+   * Starting port for upstream services (default 3000).
+   */
+  startPort?: number;
+
+  /**
    * If true (default), materialize will use taggedProcesses() (Linux-only)
    * to avoid spawning services that are already running.
    */
@@ -233,6 +238,7 @@ async function materializeOnce(
     probe: { enabled: false },
     sessionId: args.sessionId,
     listenHost: opts.listenHost,
+    portStart: opts.startPort,
   });
 
   while (true) {

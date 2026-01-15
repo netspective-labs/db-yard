@@ -435,6 +435,8 @@ function buildSurveilrSpawnPlan(args: {
       dbPath,
       "--port",
       String(init.port),
+      "--host",
+      init.listenHost,
       ...extraArgs,
     ],
     env: {
