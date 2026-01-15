@@ -118,8 +118,9 @@ export async function spawnPlan(
   // - </dev/null prevents the service from holding stdin open.
   // - nohup avoids SIGHUP teardown when parent/launcher ends.
   // - echo $! returns the background job PID (the service).
-  const shell = `nohup ${cmdline} </dev/null 1>>${shQuote(stdoutPath)} 2>>${shQuote(stderrPath)
-    } & echo $!`;
+  const shell = `nohup ${cmdline} </dev/null 1>>${shQuote(stdoutPath)} 2>>${
+    shQuote(stderrPath)
+  } & echo $!`;
 
   const launcher = new Deno.Command("sh", {
     args: ["-c", shell],
