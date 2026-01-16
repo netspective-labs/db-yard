@@ -241,36 +241,272 @@ export type SpawnedContext = Readonly<{
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K>
   : never;
 
-/* --------------------------- pid/process helpers -------------------------- */
+export type ProcessEnumerationStrategy = "/proc" | "ps";
 
-export function isPidAlive(pid: number): boolean {
+export type TaggedProcessesOptions = Readonly<{
+  strategy?: ProcessEnumerationStrategy; // caller override
+  psBin?: string; // default "ps"
+}>;
+
+type ProcLikeProvider = Readonly<{
+  strategy: ProcessEnumerationStrategy;
+  taggedProcesses(): AsyncGenerator<TaggedProcess>;
+  readCmdline(pid: number): Promise<string | undefined>;
+  readEnviron(pid: number): Promise<Record<string, string>>;
+}>;
+
+/* --------------------------- strategy selection -------------------------- */
+
+function isProbablyInContainer(): boolean {
+  // Heuristics. We try to avoid throwing and avoid hard dependencies.
+  // It’s fine if this returns a false negative; caller can override.
   try {
-    Deno.kill(pid, 0);
+    // Common envs set by runtimes.
+    const v = Deno.env.get("container");
+    if (v && v !== "0") return true;
+  } catch {
+    // ignore (no env permission)
+  }
+
+  try {
+    // Docker commonly creates this file.
+    Deno.statSync("/.dockerenv");
     return true;
   } catch {
-    return false;
+    // ignore
+  }
+
+  // cgroup markers; works on many Linux hosts/containers.
+  // If /proc is not accessible, we just give up quietly.
+  try {
+    const cgroup = Deno.readTextFileSync("/proc/1/cgroup");
+    const s = cgroup.toLowerCase();
+    if (
+      s.includes("docker") ||
+      s.includes("containerd") ||
+      s.includes("kubepods") ||
+      s.includes("podman") ||
+      s.includes("lxc")
+    ) return true;
+  } catch {
+    // ignore
+  }
+
+  return false;
+}
+
+function selectStrategy(
+  opts?: TaggedProcessesOptions,
+): ProcessEnumerationStrategy {
+  if (opts?.strategy) return opts.strategy;
+  if (Deno.build.os !== "linux") return "ps"; // only one that can degrade safely elsewhere
+  return isProbablyInContainer() ? "ps" : "/proc";
+}
+
+/* ------------------------------ ps provider ------------------------------ */
+
+type PsRun = Readonly<{
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+  code: number;
+}>;
+
+async function runPs(psBin: string, args: string[]): Promise<PsRun> {
+  try {
+    const cmd = new Deno.Command(psBin, {
+      args,
+      stdin: "null",
+      stdout: "piped",
+      stderr: "piped",
+    });
+    const out = await cmd.output();
+    return {
+      ok: out.success,
+      stdout: new TextDecoder().decode(out.stdout),
+      stderr: new TextDecoder().decode(out.stderr),
+      code: out.code,
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      stdout: "",
+      stderr: e instanceof Error ? e.message : String(e),
+      code: 127,
+    };
   }
 }
 
-export async function readProcCmdline(
-  pid: number,
-): Promise<string | undefined> {
-  // Linux-only; return undefined elsewhere or if missing.
-  const path = `/proc/${pid}/cmdline`;
-  try {
-    const bytes = await Deno.readFile(path);
-    const raw = new TextDecoder().decode(bytes);
-    const cleaned = raw.replaceAll("\u0000", " ").trim();
-    return cleaned.length ? cleaned : undefined;
-  } catch {
-    return undefined;
-  }
+async function ensurePsUsable(psBin: string): Promise<void> {
+  // procps supports --version; busybox often does not.
+  const r1 = await runPs(psBin, ["--version"]);
+  if (r1.ok) return;
+
+  // Fallback: see if "ps -eo pid=" works
+  const r2 = await runPs(psBin, ["-eo", "pid="]);
+  if (r2.ok) return;
+
+  throw new Error(
+    `ps is not available or not usable (bin=${psBin}). stderr=${
+      r1.stderr || r2.stderr
+    }`,
+  );
 }
+
+function parsePidPrefixedLine(
+  line: string,
+): { pid: number; rest: string } | undefined {
+  const m = line.trim().match(/^(\d+)\s+(.*)$/);
+  if (!m) return undefined;
+  const pid = Number(m[1]);
+  if (!Number.isFinite(pid) || pid <= 0) return undefined;
+  return { pid, rest: m[2] ?? "" };
+}
+
+function extractTruthYardEnvFromPsArgs(args: string): Record<string, string> {
+  // Best-effort. Assumes values do not contain whitespace.
+  const out: Record<string, string> = {};
+  const re = /(?:^|\s)(TRUTH_YARD_[A-Z0-9_]+)=([^\s]*)/g;
+  for (const match of args.matchAll(re)) {
+    const k = match[1];
+    const v = match[2] ?? "";
+    if (k) out[k] = v;
+  }
+  return out;
+}
+
+function bestEffortCmdlineFromPsArgs(args: string): string | undefined {
+  const i = args.indexOf("TRUTH_YARD_");
+  const cmd = (i >= 0 ? args.slice(0, i) : args).trim();
+  return cmd.length ? cmd : undefined;
+}
+
+function psProvider(psBin = "ps"): ProcLikeProvider {
+  return {
+    strategy: "ps",
+
+    async readCmdline(pid: number): Promise<string | undefined> {
+      if (Deno.build.os !== "linux") return undefined;
+      await ensurePsUsable(psBin);
+
+      const r = await runPs(psBin, ["ww", "-p", String(pid), "-o", "args="]);
+      if (!r.ok) return undefined;
+
+      const cmd = r.stdout.trim();
+      return cmd.length ? cmd : undefined;
+    },
+
+    async readEnviron(pid: number): Promise<Record<string, string>> {
+      if (Deno.build.os !== "linux") return {};
+      await ensurePsUsable(psBin);
+
+      const r = await runPs(psBin, [
+        "e",
+        "ww",
+        "-p",
+        String(pid),
+        "-o",
+        "args=",
+      ]);
+      if (!r.ok) return {};
+      return extractTruthYardEnvFromPsArgs(r.stdout);
+    },
+
+    async *taggedProcesses(): AsyncGenerator<TaggedProcess> {
+      if (Deno.build.os !== "linux") {
+        throw new Error("taggedProcesses() is Linux-only.");
+      }
+
+      await ensurePsUsable(psBin);
+
+      const r = await runPs(psBin, ["e", "ww", "-eo", "pid=,args="]);
+      if (!r.ok) {
+        const msg = (r.stderr || r.stdout || "").trim();
+        throw new Error(
+          `taggedProcesses(): ps failed: ${msg || `exit ${r.code}`}`,
+        );
+      }
+
+      const lines = r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+
+      for (const line of lines) {
+        const parsed = parsePidPrefixedLine(line);
+        if (!parsed) continue;
+
+        const { pid, rest: args } = parsed;
+
+        const env = extractTruthYardEnvFromPsArgs(args);
+
+        const provenance = env["TRUTH_YARD_PROVENANCE"];
+        const contextPath = env["TRUTH_YARD_CONTEXT_PATH"];
+        const sessionId = env["TRUTH_YARD_SESSION_ID"];
+        const serviceId = env["TRUTH_YARD_SERVICE_ID"];
+
+        if (!provenance || !contextPath || !sessionId || !serviceId) continue;
+
+        const cmdline = bestEffortCmdlineFromPsArgs(args);
+
+        let issue: Error | unknown;
+        let context: SpawnedContext | undefined;
+
+        try {
+          const ctxContent = await Deno.readTextFile(contextPath);
+          context = JSON.parse(ctxContent) as SpawnedContext;
+        } catch (e) {
+          issue = e;
+          context = undefined;
+        }
+
+        const kind = env["TRUTH_YARD_KIND"];
+        const label = env["TRUTH_YARD_LABEL"];
+        const proxyEndpointPrefix = env["TRUTH_YARD_PROXY_ENDPOINT_PREFIX"];
+        const upstreamUrl = env["TRUTH_YARD_UPSTREAM_URL"];
+
+        const ctxPidRaw =
+          (context as unknown as { spawned?: { pid?: unknown } })?.spawned?.pid;
+        const ctxPid = typeof ctxPidRaw === "number"
+          ? ctxPidRaw
+          : Number(ctxPidRaw);
+
+        if (
+          context && Number.isFinite(ctxPid) && ctxPid > 0 && ctxPid !== pid
+        ) {
+          const pidIssue = new Error(
+            `PID mismatch: ps pid=${pid} but context.spawned.pid=${ctxPid} (contextPath=${contextPath})`,
+          );
+          issue = issue
+            ? new AggregateError(
+              [issue, pidIssue],
+              "taggedProcesses(): issues detected",
+            )
+            : pidIssue;
+        }
+
+        yield {
+          pid,
+          sessionId,
+          serviceId,
+          contextPath,
+          provenance,
+          env,
+          context,
+          cmdline,
+          issue,
+          kind,
+          label,
+          proxyEndpointPrefix,
+          upstreamUrl,
+        } satisfies TaggedProcess;
+      }
+    },
+  };
+}
+
+/* ----------------------------- /proc provider ---------------------------- */
 
 function parseProcEnviron(bytes: Uint8Array): Record<string, string> {
   const text = new TextDecoder().decode(bytes);
   const out: Record<string, string> = {};
-  // /proc/<pid>/environ is NUL-separated KEY=VAL strings
   for (const part of text.split("\u0000")) {
     if (!part) continue;
     const eq = part.indexOf("=");
@@ -282,12 +518,189 @@ function parseProcEnviron(bytes: Uint8Array): Record<string, string> {
   return out;
 }
 
-export async function readProcEnviron(
+async function readProcCmdlineDirect(pid: number): Promise<string | undefined> {
+  const path = `/proc/${pid}/cmdline`;
+  try {
+    const bytes = await Deno.readFile(path);
+    const raw = new TextDecoder().decode(bytes);
+    const cleaned = raw.replaceAll("\u0000", " ").trim();
+    return cleaned.length ? cleaned : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function readProcEnvironDirect(
   pid: number,
 ): Promise<Record<string, string>> {
   const path = `/proc/${pid}/environ`;
-  const bytes = await Deno.readFile(path);
-  return parseProcEnviron(bytes);
+  try {
+    const bytes = await Deno.readFile(path);
+    return parseProcEnviron(bytes);
+  } catch {
+    return {};
+  }
+}
+
+function procProvider(): ProcLikeProvider {
+  return {
+    strategy: "/proc",
+
+    async readCmdline(pid: number): Promise<string | undefined> {
+      if (Deno.build.os !== "linux") return undefined;
+      return await readProcCmdlineDirect(pid);
+    },
+
+    async readEnviron(pid: number): Promise<Record<string, string>> {
+      if (Deno.build.os !== "linux") return {};
+      return await readProcEnvironDirect(pid);
+    },
+
+    async *taggedProcesses(): AsyncGenerator<TaggedProcess> {
+      if (Deno.build.os !== "linux") {
+        throw new Error("taggedProcesses() is Linux-only (requires /proc).");
+      }
+
+      let dir: AsyncIterable<Deno.DirEntry>;
+      try {
+        dir = Deno.readDir("/proc");
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new Error(`taggedProcesses(): cannot read /proc: ${msg}`);
+      }
+
+      for await (const e of dir) {
+        if (!e.isDirectory) continue;
+        const name = e.name;
+        if (!/^\d+$/.test(name)) continue;
+
+        const pid = Number(name);
+        if (!Number.isFinite(pid) || pid <= 0) continue;
+
+        const env = await readProcEnvironDirect(pid);
+
+        const provenance = env["TRUTH_YARD_PROVENANCE"];
+        const contextPath = env["TRUTH_YARD_CONTEXT_PATH"];
+        const sessionId = env["TRUTH_YARD_SESSION_ID"];
+        const serviceId = env["TRUTH_YARD_SERVICE_ID"];
+
+        if (!provenance || !contextPath || !sessionId || !serviceId) continue;
+
+        const cmdline = await readProcCmdlineDirect(pid);
+
+        let issue: Error | unknown;
+        let context: SpawnedContext | undefined;
+
+        try {
+          const ctxContent = await Deno.readTextFile(contextPath);
+          context = JSON.parse(ctxContent) as SpawnedContext;
+        } catch (e2) {
+          issue = e2;
+          context = undefined;
+        }
+
+        const kind = env["TRUTH_YARD_KIND"];
+        const label = env["TRUTH_YARD_LABEL"];
+        const proxyEndpointPrefix = env["TRUTH_YARD_PROXY_ENDPOINT_PREFIX"];
+        const upstreamUrl = env["TRUTH_YARD_UPSTREAM_URL"];
+
+        const ctxPidRaw =
+          (context as unknown as { spawned?: { pid?: unknown } })?.spawned?.pid;
+        const ctxPid = typeof ctxPidRaw === "number"
+          ? ctxPidRaw
+          : Number(ctxPidRaw);
+
+        if (
+          context && Number.isFinite(ctxPid) && ctxPid > 0 && ctxPid !== pid
+        ) {
+          const pidIssue = new Error(
+            `PID mismatch: /proc pid=${pid} but context.spawned.pid=${ctxPid} (contextPath=${contextPath})`,
+          );
+          issue = issue
+            ? new AggregateError(
+              [issue, pidIssue],
+              "taggedProcesses(): issues detected",
+            )
+            : pidIssue;
+        }
+
+        yield {
+          pid,
+          sessionId,
+          serviceId,
+          contextPath,
+          provenance,
+          env,
+          context,
+          cmdline,
+          issue,
+          kind,
+          label,
+          proxyEndpointPrefix,
+          upstreamUrl,
+        } satisfies TaggedProcess;
+      }
+    },
+  };
+}
+
+/* ---------------------------- exported API shim --------------------------- */
+
+// Keep your existing exports, but make them dispatch through the selected strategy.
+// taggedProcesses() now accepts options.
+
+export async function readProcCmdline(
+  pid: number,
+): Promise<string | undefined> {
+  // Default to the selected strategy for cmdline reads too.
+  const strat = selectStrategy();
+  if (strat === "ps") return await psProvider().readCmdline(pid);
+  return await procProvider().readCmdline(pid);
+}
+
+export async function readProcEnviron(
+  pid: number,
+): Promise<Record<string, string>> {
+  const strat = selectStrategy();
+  if (strat === "ps") return await psProvider().readEnviron(pid);
+  return await procProvider().readEnviron(pid);
+}
+
+/**
+ * Linux-only: yield all processes "owned" by Truth Yard using env tags:
+ * - TRUTH_YARD_PROVENANCE
+ * - TRUTH_YARD_CONTEXT_PATH
+ * - TRUTH_YARD_SESSION_ID
+ * - TRUTH_YARD_SERVICE_ID
+ * - TRUTH_YARD_KIND
+ * - TRUTH_YARD_LABEL
+ * - TRUTH_YARD_PROXY_ENDPOINT_PREFIX
+ * - TRUTH_YARD_UPSTREAM_URL
+ *
+ * Notes:
+ * - Requires permission to read /proc/<pid>/environ for target processes.
+ * - Skips processes we cannot inspect (/proc perms) or that don't include CONTEXT_PATH.
+ * - Reads cmdline and context.json best-effort; yields even if those enrichments fail.
+ */
+export async function* taggedProcesses(
+  opts?: TaggedProcessesOptions,
+): AsyncGenerator<TaggedProcess> {
+  const strat = selectStrategy(opts);
+  const provider = strat === "ps"
+    ? psProvider(opts?.psBin ?? "ps")
+    : procProvider();
+  yield* provider.taggedProcesses();
+}
+
+/* --------------------------- pid/process helpers -------------------------- */
+
+export function isPidAlive(pid: number): boolean {
+  try {
+    Deno.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function killPID(pid: number): Promise<void> {
@@ -724,145 +1137,6 @@ export type TaggedProcess = Readonly<{
   // If we found a tagged process but could not fully enrich it.
   issue?: Error | unknown;
 }>;
-
-/**
- * Linux-only: yield all processes "owned" by Truth Yard using env tags:
- * - TRUTH_YARD_PROVENANCE
- * - TRUTH_YARD_CONTEXT_PATH
- * - TRUTH_YARD_SESSION_ID
- * - TRUTH_YARD_SERVICE_ID
- * - TRUTH_YARD_KIND
- * - TRUTH_YARD_LABEL
- * - TRUTH_YARD_PROXY_ENDPOINT_PREFIX
- * - TRUTH_YARD_UPSTREAM_URL
- *
- * Notes:
- * - Requires permission to read /proc/<pid>/environ for target processes.
- * - Skips processes we cannot inspect (/proc perms) or that don't include CONTEXT_PATH.
- * - Reads cmdline and context.json best-effort; yields even if those enrichments fail.
- */
-export async function* taggedProcesses(): AsyncGenerator<TaggedProcess> {
-  if (Deno.build.os !== "linux") {
-    throw new Error("taggedProcesses() is Linux-only (requires /proc).");
-  }
-
-  let dir: AsyncIterable<Deno.DirEntry>;
-  try {
-    dir = Deno.readDir("/proc");
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    throw new Error(`taggedProcesses(): cannot read /proc: ${msg}`);
-  }
-
-  for await (const e of dir) {
-    if (!e.isDirectory) continue;
-
-    const name = e.name;
-    if (!/^\d+$/.test(name)) continue;
-
-    const pid = Number(name);
-    if (!Number.isFinite(pid) || pid <= 0) continue;
-
-    let env: Record<string, string>;
-    try {
-      env = await readProcEnviron(pid);
-    } catch {
-      continue;
-    }
-
-    const envProvenance = env["TRUTH_YARD_PROVENANCE"];
-    if (typeof envProvenance !== "string" || envProvenance.length === 0) {
-      continue;
-    }
-
-    const envContextPath = env["TRUTH_YARD_CONTEXT_PATH"];
-    if (typeof envContextPath !== "string" || envContextPath.length === 0) {
-      continue;
-    }
-
-    const sessionId = env["TRUTH_YARD_SESSION_ID"];
-    if (typeof sessionId !== "string" || sessionId.length === 0) {
-      continue;
-    }
-
-    const serviceId = env["TRUTH_YARD_SERVICE_ID"];
-    if (typeof serviceId !== "string" || serviceId.length === 0) {
-      continue;
-    }
-
-    const contextPath = envContextPath;
-    const provenance = envProvenance;
-
-    let cmdline: string | undefined;
-    try {
-      cmdline = await readProcCmdline(pid);
-    } catch {
-      cmdline = undefined;
-    }
-
-    let issue: Error | unknown;
-    let context: SpawnedContext | undefined;
-
-    try {
-      const ctxContent = await Deno.readTextFile(contextPath);
-      context = JSON.parse(ctxContent) as SpawnedContext;
-    } catch (e) {
-      issue = e;
-      context = undefined;
-    }
-
-    const kind = typeof env["TRUTH_YARD_KIND"] === "string"
-      ? env["TRUTH_YARD_KIND"]
-      : undefined;
-    const label = typeof env["TRUTH_YARD_LABEL"] === "string"
-      ? env["TRUTH_YARD_LABEL"]
-      : undefined;
-    const proxyEndpointPrefix =
-      typeof env["TRUTH_YARD_PROXY_ENDPOINT_PREFIX"] === "string"
-        ? env["TRUTH_YARD_PROXY_ENDPOINT_PREFIX"]
-        : undefined;
-    const upstreamUrl = typeof env["TRUTH_YARD_UPSTREAM_URL"] === "string"
-      ? env["TRUTH_YARD_UPSTREAM_URL"]
-      : undefined;
-
-    // Validate pid consistency: /proc/<pid> vs context.spawned.pid
-    const ctxPidRaw = (context as unknown as { spawned?: { pid?: unknown } })
-      ?.spawned?.pid;
-    const ctxPid = typeof ctxPidRaw === "number"
-      ? ctxPidRaw
-      : Number(ctxPidRaw);
-
-    if (context && Number.isFinite(ctxPid) && ctxPid > 0 && ctxPid !== pid) {
-      const pidIssue = new Error(
-        `PID mismatch: /proc pid=${pid} but context.spawned.pid=${ctxPid} (contextPath=${contextPath})`,
-      );
-      if (issue) {
-        issue = new AggregateError(
-          [issue, pidIssue],
-          "taggedProcesses(): issues detected",
-        );
-      } else {
-        issue = pidIssue;
-      }
-    }
-
-    yield {
-      pid,
-      sessionId,
-      serviceId,
-      contextPath,
-      provenance,
-      env,
-      context,
-      cmdline,
-      issue,
-      kind,
-      label,
-      proxyEndpointPrefix,
-      upstreamUrl,
-    } satisfies TaggedProcess;
-  }
-}
 
 export async function killSpawnedProcesses() {
   for await (const { pid } of taggedProcesses()) {

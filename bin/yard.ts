@@ -41,69 +41,17 @@ export async function lsLedgers(
   }
 }
 
-export async function lsProcesses(
-  opts: Readonly<{ extended?: boolean }> = {},
-): Promise<void> {
-  const extended = opts.extended === true;
+const psStrategyType = new EnumType(["container", "native"] as const);
 
-  const kv = (key: string, value: unknown) => {
-    const v = value == null || value === "" ? "(none)" : String(value);
-    return `  ${dim(key)}: ${blue(v)}`;
-  };
+const YARD_VERSION = "dev";
 
-  const issueToString = (issue: unknown): string => {
-    if (!issue) return "";
-    if (issue instanceof AggregateError) {
-      const parts = issue.errors.map((e) =>
-        e instanceof Error ? e.message : String(e)
-      );
-      return parts.join(" | ");
-    }
-    if (issue instanceof Error) return issue.message;
-    return String(issue);
-  };
-
-  for await (const p of taggedProcesses()) {
-    const pidLabel = green(String(p.pid));
-
-    const kind = p.context?.service?.kind ?? p.kind ?? "unknown";
-    const nature = p.context?.supplier?.nature ?? "unknown";
-
-    const kindLabel = cyan(kind);
-    const natureLabel = dim(nature);
-
-    const upstreamUrl = p.context?.service?.upstreamUrl ??
-      p.upstreamUrl ??
-      "(no context)";
-
-    const urlLabel = yellow(upstreamUrl);
-
-    console.log(
-      `${extended ? "" : "🟢 "}[${pidLabel}] ${urlLabel} ${
-        dim("(")
-      }${kindLabel}${dim("/")}${natureLabel}${dim(")")}`,
-    );
-
-    if (!extended) continue;
-
-    const issueStr = issueToString(p.issue);
-
-    console.log(kv("provenance", p.provenance));
-    console.log(kv("sessionId", p.sessionId));
-    console.log(kv("serviceId", p.serviceId));
-    console.log(kv("kind", p.kind ?? p.context?.service?.kind));
-    console.log(kv("label", p.label ?? p.context?.service?.label));
-    console.log(
-      kv(
-        "proxyEndpointPrefix",
-        p.proxyEndpointPrefix ?? p.context?.service?.proxyEndpointPrefix,
-      ),
-    );
-    console.log(kv("upstreamUrl", upstreamUrl));
-    console.log(kv("contextPath", p.contextPath));
-    console.log(kv("cmdline", p.cmdline));
-    if (issueStr) console.log(kv("issue", issueStr));
-  }
+function escapeHtml(s: string): string {
+  return s
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 async function psReconcile(
@@ -168,35 +116,105 @@ async function psReconcile(
   }
 }
 
-const YARD_VERSION = "dev";
+export async function lsProcesses(
+  opts: Readonly<{ extended?: boolean; strategy?: "container" | "native" }> =
+    {},
+): Promise<void> {
+  const extended = opts.extended === true;
 
-function escapeHtml(s: string): string {
-  return s
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
+  const spawnStrategy = opts.strategy === "container"
+    ? "ps"
+    : opts.strategy === "native"
+    ? "/proc"
+    : undefined;
+
+  const kv = (key: string, value: unknown) => {
+    const v = value == null || value === "" ? "(none)" : String(value);
+    return `  ${dim(key)}: ${blue(v)}`;
+  };
+
+  const issueToString = (issue: unknown): string => {
+    if (!issue) return "";
+    if (issue instanceof AggregateError) {
+      const parts = issue.errors.map((e) =>
+        e instanceof Error ? e.message : String(e)
+      );
+      return parts.join(" | ");
+    }
+    if (issue instanceof Error) return issue.message;
+    return String(issue);
+  };
+
+  for await (
+    const p of taggedProcesses(
+      spawnStrategy ? { strategy: spawnStrategy } : undefined,
+    )
+  ) {
+    const pidLabel = green(String(p.pid));
+
+    const kind = p.context?.service?.kind ?? p.kind ?? "unknown";
+    const nature = p.context?.supplier?.nature ?? "unknown";
+
+    const kindLabel = cyan(kind);
+    const natureLabel = dim(nature);
+
+    const upstreamUrl = p.context?.service?.upstreamUrl ??
+      p.upstreamUrl ??
+      "(no context)";
+
+    const urlLabel = yellow(upstreamUrl);
+
+    console.log(
+      `${extended ? "" : "🟢 "}[${pidLabel}] ${urlLabel} ${
+        dim("(")
+      }${kindLabel}${dim("/")}${natureLabel}${dim(")")}`,
+    );
+
+    if (!extended) continue;
+
+    const issueStr = issueToString(p.issue);
+
+    console.log(kv("provenance", p.provenance));
+    console.log(kv("sessionId", p.sessionId));
+    console.log(kv("serviceId", p.serviceId));
+    console.log(kv("kind", p.kind ?? p.context?.service?.kind));
+    console.log(kv("label", p.label ?? p.context?.service?.label));
+    console.log(
+      kv(
+        "proxyEndpointPrefix",
+        p.proxyEndpointPrefix ?? p.context?.service?.proxyEndpointPrefix,
+      ),
+    );
+    console.log(kv("upstreamUrl", upstreamUrl));
+    console.log(kv("contextPath", p.contextPath));
+    console.log(kv("cmdline", p.cmdline));
+    if (issueStr) console.log(kv("issue", issueStr));
+  }
 }
 
-/**
- * Simplified HTML generator for `ps --html`.
- * - Only supports the non-reconcile path (lsProcesses/taggedProcesses).
- * - Proxy prefix is derived from the first path segment of the Upstream URL.
- * - PID is at the end of the row.
- * - Minimal "Process" expander for any extra fields we can discover.
- */
-export async function htmlFromLsProcesses(): Promise<void> {
+// 4) Update htmlFromLsProcesses to accept an optional strategy and pass through
+export async function htmlFromLsProcesses(
+  opts: Readonly<{ strategy?: "container" | "native" }> = {},
+): Promise<void> {
   const rows: string[] = [];
   let count = 0;
 
-  for await (const p of taggedProcesses()) {
+  const spawnStrategy = opts.strategy === "container"
+    ? "ps"
+    : opts.strategy === "native"
+    ? "/proc"
+    : undefined;
+
+  for await (
+    const p of taggedProcesses(
+      spawnStrategy ? { strategy: spawnStrategy } : undefined,
+    )
+  ) {
     count++;
 
     const pid = (typeof p.pid === "number") ? p.pid : undefined;
     const alive = true;
 
-    // Proxy prefix = first path segment of upstream URL (no host/port)
     const proxyPrefix = p.proxyEndpointPrefix ?? "?";
     const proxyHref = p.proxyEndpointPrefix ?? "#";
     const upstreamHref = p.upstreamUrl ?? "#";
@@ -205,15 +223,11 @@ export async function htmlFromLsProcesses(): Promise<void> {
     const serviceName = p.serviceId;
     const statusEmoji = alive === true ? "🟢" : alive === false ? "🔴" : "⚪";
 
-    // Minimal expandable debug; only show extra fields if present and only when extended
     let detailsHtml = "";
     const extras = [
       ["cmdline", p.cmdline],
       ["kind", p.kind],
-      [
-        "contextPath",
-        p.contextPath,
-      ],
+      ["contextPath", p.contextPath],
       ["label", p.label],
       [
         "env",
@@ -294,7 +308,7 @@ export async function htmlFromLsProcesses(): Promise<void> {
   <main class="container">
     <header>
       <h1>
-        <img src="https://raw.githubusercontent.com/netspective-labs/truth-yard/refs/heads/main/support/oty-logo-189x72.png"> 
+        <img src="https://raw.githubusercontent.com/netspective-labs/truth-yard/refs/heads/main/support/oty-logo-189x72.png">
         Operational Truth Yard Services
       </h1>
       <p class="secondary">${count} service${
@@ -619,20 +633,28 @@ await new Command()
     `Spawn state home OR a specific sessionHome (default ${defaultLedgerHome})`,
     { default: defaultLedgerHome },
   )
+  .type("ps_strategy", psStrategyType)
+  .option(
+    "--strategy <s:ps_strategy>",
+    "Process enumeration strategy: container=ps, native=/proc (default: auto)",
+  )
   .option("--html", "Emit a static HTML index page to STDOUT")
   .action(async (options) => {
     if (options.html) {
       if (options.reconcile) {
         throw new Error("ps --html cannot be used with --reconcile");
       }
-      await htmlFromLsProcesses();
+      await htmlFromLsProcesses({ strategy: options.strategy });
       return;
     }
 
     if (options.reconcile) {
       await psReconcile(options.ledgerHome);
     } else {
-      await lsProcesses(options);
+      await lsProcesses({
+        extended: options.extended,
+        strategy: options.strategy,
+      });
     }
   })
   .command(
