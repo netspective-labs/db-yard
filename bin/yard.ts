@@ -12,7 +12,10 @@ import {
   type ReconcileItem,
   spawnedLedgerStates,
 } from "../lib/materialize.ts";
-import { generateReverseProxyConfsFromSpawnedStates } from "../lib/reverse-proxy-conf.ts";
+import {
+  generateReverseProxyConfsFromSpawnedStates,
+  nginxProxyManagerJSON,
+} from "../lib/reverse-proxy-conf.ts";
 import { killSpawnedProcesses, taggedProcesses } from "../lib/spawn.ts";
 
 export async function lsLedgers(
@@ -352,7 +355,9 @@ export async function htmlFromLsProcesses(
 }
 
 const verboseType = new EnumType(["essential", "comprehensive"] as const);
-const proxyType = new EnumType(["nginx", "traefik", "both"] as const);
+const proxyType = new EnumType(
+  ["nginx", "traefik", "both", "nginx-proxy-manager"] as const,
+);
 const dialectType = new EnumType(["SQLite", "DuckDB"] as const);
 const scopeType = new EnumType(["admin", "cross-tenant", "tenant"] as const);
 
@@ -703,9 +708,19 @@ await new Command()
     "--traefik-extra <text:string>",
     "traefik: extra yaml appended at end",
   )
+  .option(
+    "--upstream-scheme <scheme:string>",
+    "nginx-proxy-manager: forward_scheme (default 'http')",
+  )
+  .option(
+    "--upstream-host <host:string>",
+    "nginx-proxy-manager: forward_host (default '0.0.0.0')",
+    { default: "0.0.0.0" },
+  )
   .action(async (o) => {
     const wantNginx = o.type === "nginx" || o.type === "both";
     const wantTraefik = o.type === "traefik" || o.type === "both";
+    const wantNPM = o.type === "nginx-proxy-manager";
 
     const overrides = {
       nginx: {
@@ -722,7 +737,21 @@ await new Command()
         stripPrefix: o.stripPrefix ? true : undefined,
         extra: o.traefikExtra,
       },
+      nginxProxyManager: {
+        locationPrefix: o.locationPrefix,
+        upstreamScheme: o.upstreamScheme,
+        upstreamHost: o.upstreamHost,
+      },
     } as const;
+
+    if (wantNPM) {
+      const states = [];
+      for await (const s of taggedProcesses()) {
+        states.push(s);
+      }
+      console.log(nginxProxyManagerJSON(states, overrides));
+      return;
+    }
 
     await generateReverseProxyConfsFromSpawnedStates({
       nginxConfHome: wantNginx ? o.nginxOut : undefined,
