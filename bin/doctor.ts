@@ -104,15 +104,22 @@ export const checkup = doctor(function* () {
 
         if (hooksPath.trim().length > 0) {
           try {
-            const hookFiles = (await $`find ${hooksPath} -maxdepth 1 -type f`.noThrow().lines()).filter(f => f.trim().length > 0);
+            const hookFiles =
+              (await $`find ${hooksPath} -maxdepth 1 -type f`.noThrow().lines())
+                .filter((f) => f.trim().length > 0);
             if (hookFiles.length > 0) {
               for (const hook of hookFiles) {
                 const info = await Deno.stat(hook);
-                const isExecutable = info.mode ? (info.mode & 0o111) !== 0 : false;
+                const isExecutable = info.mode
+                  ? (info.mode & 0o111) !== 0
+                  : false;
                 if (isExecutable) {
                   report({ ok: `Git hook executable: ${hook}` });
                 } else {
-                  report({ warn: `Git hook NOT executable: ${hook} (run \`chmod +x ${hook}\`)` });
+                  report({
+                    warn:
+                      `Git hook NOT executable: ${hook} (run \`chmod +x ${hook}\`)`,
+                  });
                 }
               }
             } else {
@@ -136,7 +143,10 @@ export const checkup = doctor(function* () {
         await report({
           test: async () => (await $.commandExists("sqlite3")
             ? { ok: `sqlite3: ${(await $`sqlite3 --version`.lines())[0]}` }
-            : { warn: "sqlite3 not found in PATH, but it is required for truth-yard" }),
+            : {
+              warn:
+                "sqlite3 not found in PATH, but it is required for truth-yard",
+            }),
         });
         await report({
           test: async () => (await $.commandExists("sqlpage")
@@ -157,8 +167,15 @@ export const checkup = doctor(function* () {
       diagnose: async (report) => {
         await report({
           test: async () => (await $.commandExists("nginx")
-            ? { ok: `nginx: ${(await $`nginx -v`.noThrow().captureCombined()).combined.trim()}` }
-            : { suggest: "nginx not found in PATH, install it if you want to use nginx as a reverse proxy" }),
+            ? {
+              ok: `nginx: ${
+                (await $`nginx -v`.noThrow().captureCombined()).combined.trim()
+              }`,
+            }
+            : {
+              suggest:
+                "nginx not found in PATH, install it if you want to use nginx as a reverse proxy",
+            }),
         });
         await report({
           test: async () => (await $.commandExists("psql")
@@ -182,7 +199,7 @@ export const checkup = doctor(function* () {
         };
         report({ test: () => checkFile("bin/yard.ts") });
         report({ test: () => checkFile("deno.jsonc") });
-      }
+      },
     };
   });
 });
