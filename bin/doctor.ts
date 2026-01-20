@@ -197,8 +197,8 @@ export const checkup = doctor(function* () {
             return { warn: `${path} is missing` };
           }
         };
-        report({ test: () => checkFile("bin/yard.ts") });
-        report({ test: () => checkFile("deno.jsonc") });
+        await report({ test: () => checkFile("bin/yard.ts") });
+        await report({ test: () => checkFile("deno.jsonc") });
       },
     };
   });
