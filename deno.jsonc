@@ -2,6 +2,7 @@
   "lock": false,
   "tasks": {
     "init": "git config core.hooksPath .githooks",
+    "doctor": "bin/doctor.ts",
     "sync-import-map": "deno eval --ext ts 'import JSON5 from \"npm:json5@^2\"; const raw = await Deno.readTextFile(\"deno.jsonc\"); const cfg = JSON5.parse(raw); const imports = cfg.imports ?? {}; await Deno.writeTextFile(\"import_map.json\", JSON.stringify({ imports }, null, 2)); console.log(\"import_map.json synced\");' && deno fmt import_map.json",
     "git-hook-pre-commit": "deno fmt --check --ignore=\"support\" --ignore=\"**/fixture\" && deno lint  --ignore=\"support\" && deno test --parallel --allow-all --v8-flags=\"--max-old-space-size=4096\"",
     "git-hook-pre-push": "deno test --parallel --allow-all --v8-flags=\"--max-old-space-size=4096\"",
