@@ -315,14 +315,15 @@ export function traefikReverseProxyConfFromState(
           X-Truth-Yard-Kind: "${yamlEscape(kind)}"
           X-Truth-Yard-Pid: "${yamlEscape(String(s.pid))}"
           X-Truth-Yard-Upstream: "${yamlEscape(url)}"
-          X-Truth-Yard-ProxyPrefix: "${yamlEscape(lpNoTrail + "/")}"${stripPrefix
+          X-Truth-Yard-ProxyPrefix: "${yamlEscape(lpNoTrail + "/")}"${
+    stripPrefix
       ? `
     ${mwStripName}:
       stripPrefix:
         prefixes:
           - "${yamlEscape(lpNoTrail)}"`
       : ""
-    }
+  }
 `;
 
   const middlewares = stripPrefix
