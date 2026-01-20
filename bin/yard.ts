@@ -12,7 +12,10 @@ import {
   type ReconcileItem,
   spawnedLedgerStates,
 } from "../lib/materialize.ts";
-import { generateReverseProxyConfsFromSpawnedStates } from "../lib/reverse-proxy-conf.ts";
+import {
+  generateReverseProxyConfsFromSpawnedStates,
+  nginxProxyManagerJSON,
+} from "../lib/reverse-proxy-conf.ts";
 import { killSpawnedProcesses, taggedProcesses } from "../lib/spawn.ts";
 
 export async function lsLedgers(
@@ -34,8 +37,7 @@ export async function lsLedgers(
     const urlLabel = pidAlive ? yellow(upstreamUrl) : dim(upstreamUrl);
 
     console.log(
-      `${statusIcon} [${pidLabel}] ${urlLabel} ${dim("(")}${kindLabel}${
-        dim("/")
+      `${statusIcon} [${pidLabel}] ${urlLabel} ${dim("(")}${kindLabel}${dim("/")
       }${natureLabel}${dim(")")}`,
     );
   }
@@ -79,8 +81,7 @@ export async function lsProcesses(
     const urlLabel = yellow(upstreamUrl);
 
     console.log(
-      `${extended ? "" : "🟢 "}[${pidLabel}] ${urlLabel} ${
-        dim("(")
+      `${extended ? "" : "🟢 "}[${pidLabel}] ${urlLabel} ${dim("(")
       }${kindLabel}${dim("/")}${natureLabel}${dim(")")}`,
     );
 
@@ -118,18 +119,16 @@ async function psReconcile(
       const sess = dim(item.sessionId);
       const ctx = blue(item.contextPath);
       const cmd = item.cmdline ? dim(item.cmdline) : dim("(no cmdline)");
-      return `🟡 ${
-        yellow("process without ledger")
-      } [${pid}] serviceId=${sid} sessionId=${sess}\n  contextPath=${ctx}\n  cmdline=${cmd}`;
+      return `🟡 ${yellow("process without ledger")
+        } [${pid}] serviceId=${sid} sessionId=${sess}\n  contextPath=${ctx}\n  cmdline=${cmd}`;
     }
 
     const pid = red(String(item.pid));
     const ctx = blue(item.ledgerContextPath);
     const sid = item.serviceId ? cyan(item.serviceId) : dim("(unknown)");
     const sess = item.sessionId ? dim(item.sessionId) : dim("(unknown)");
-    return `🟠 ${
-      yellow("ledger without process")
-    } [${pid}] serviceId=${sid} sessionId=${sess}\n  ledgerContextPath=${ctx}`;
+    return `🟠 ${yellow("ledger without process")
+      } [${pid}] serviceId=${sid} sessionId=${sess}\n  ledgerContextPath=${ctx}`;
   };
 
   let any = false;
@@ -147,13 +146,11 @@ async function psReconcile(
 
       console.log(headline);
       console.log(
-        `  ${dim("processWithoutLedger")}: ${
-          blue(String(s.processWithoutLedger))
+        `  ${dim("processWithoutLedger")}: ${blue(String(s.processWithoutLedger))
         }`,
       );
       console.log(
-        `  ${dim("ledgerWithoutProcess")}: ${
-          blue(String(s.ledgerWithoutProcess))
+        `  ${dim("ledgerWithoutProcess")}: ${blue(String(s.ledgerWithoutProcess))
         }`,
       );
 
@@ -230,15 +227,13 @@ export async function htmlFromLsProcesses(): Promise<void> {
 <details>
   <summary>⚙️ Process</summary>
   <ul>
-    ${
-        extras
+    ${extras
           .map(([k, v]) =>
-            `<li><strong>${escapeHtml(k ?? "")}</strong>: <code>${
-              escapeHtml(String(v))
+            `<li><strong>${escapeHtml(k ?? "")}</strong>: <code>${escapeHtml(String(v))
             }</code></li>`
           )
           .join("\n")
-      }
+        }
   </ul>
 </details>`.trim();
     } else {
@@ -297,9 +292,8 @@ export async function htmlFromLsProcesses(): Promise<void> {
         <img src="https://raw.githubusercontent.com/netspective-labs/truth-yard/refs/heads/main/support/oty-logo-189x72.png"> 
         Operational Truth Yard Services
       </h1>
-      <p class="secondary">${count} service${
-    count === 1 ? "" : "s"
-  } discovered</p>
+      <p class="secondary">${count} service${count === 1 ? "" : "s"
+    } discovered</p>
     </header>
 
     <section>
@@ -315,20 +309,18 @@ export async function htmlFromLsProcesses(): Promise<void> {
             </tr>
           </thead>
           <tbody>
-            ${
-    rows.length
+            ${rows.length
       ? rows.join("\n")
       : `<tr><td colspan="5" class="secondary">No services found.</td></tr>`
-  }
+    }
           </tbody>
         </table>
       </figure>
     </section>
 
     <footer>
-      <small>Generated ${escapeHtml(generatedAt)} · yard version ${
-    escapeHtml(YARD_VERSION)
-  }</small>
+      <small>Generated ${escapeHtml(generatedAt)} · yard version ${escapeHtml(YARD_VERSION)
+    }</small>
     </footer>
   </main>
 </body>
@@ -338,7 +330,9 @@ export async function htmlFromLsProcesses(): Promise<void> {
 }
 
 const verboseType = new EnumType(["essential", "comprehensive"] as const);
-const proxyType = new EnumType(["nginx", "traefik", "both"] as const);
+const proxyType = new EnumType(
+  ["nginx", "traefik", "both", "nginx-proxy-manager"] as const,
+);
 const dialectType = new EnumType(["SQLite", "DuckDB"] as const);
 const scopeType = new EnumType(["admin", "cross-tenant", "tenant"] as const);
 
@@ -436,14 +430,12 @@ await new Command()
           `👀 ${green("Watch mode enabled")} — monitoring ${yellow(cargoHome)}`,
         );
         console.log(
-          `⏱️  debounce=${
-            blue(
-              String(watchDebounceMs ?? 750),
-            )
-          }ms  strictKillsOnly=${
-            blue(
-              String(!!watchStrictKillsOnly),
-            )
+          `⏱️  debounce=${blue(
+            String(watchDebounceMs ?? 750),
+          )
+          }ms  strictKillsOnly=${blue(
+            String(!!watchStrictKillsOnly),
+          )
           }`,
         );
         console.log(dim("Press Ctrl+C to stop watching.\n"));
@@ -681,9 +673,19 @@ await new Command()
     "--traefik-extra <text:string>",
     "traefik: extra yaml appended at end",
   )
+  .option(
+    "--upstream-scheme <scheme:string>",
+    "nginx-proxy-manager: forward_scheme (default 'http')",
+  )
+  .option(
+    "--upstream-host <host:string>",
+    "nginx-proxy-manager: forward_host (default '0.0.0.0')",
+    { default: "0.0.0.0" },
+  )
   .action(async (o) => {
     const wantNginx = o.type === "nginx" || o.type === "both";
     const wantTraefik = o.type === "traefik" || o.type === "both";
+    const wantNPM = o.type === "nginx-proxy-manager";
 
     const overrides = {
       nginx: {
@@ -700,7 +702,21 @@ await new Command()
         stripPrefix: o.stripPrefix ? true : undefined,
         extra: o.traefikExtra,
       },
+      nginxProxyManager: {
+        locationPrefix: o.locationPrefix,
+        upstreamScheme: o.upstreamScheme,
+        upstreamHost: o.upstreamHost,
+      },
     } as const;
+
+    if (wantNPM) {
+      const states = [];
+      for await (const s of taggedProcesses()) {
+        states.push(s);
+      }
+      console.log(nginxProxyManagerJSON(states, overrides));
+      return;
+    }
 
     await generateReverseProxyConfsFromSpawnedStates({
       nginxConfHome: wantNginx ? o.nginxOut : undefined,

@@ -56,6 +56,11 @@ export type ProxyConfOverrides = Readonly<{
     stripPrefix?: boolean;
     extra?: string;
   }>;
+  nginxProxyManager?: Readonly<{
+    locationPrefix?: string;
+    upstreamScheme?: string;
+    upstreamHost?: string;
+  }>;
 }>;
 
 type SpawnedState = Awaited<ReturnType<typeof taggedProcesses>> extends
@@ -310,15 +315,14 @@ export function traefikReverseProxyConfFromState(
           X-Truth-Yard-Kind: "${yamlEscape(kind)}"
           X-Truth-Yard-Pid: "${yamlEscape(String(s.pid))}"
           X-Truth-Yard-Upstream: "${yamlEscape(url)}"
-          X-Truth-Yard-ProxyPrefix: "${yamlEscape(lpNoTrail + "/")}"${
-    stripPrefix
+          X-Truth-Yard-ProxyPrefix: "${yamlEscape(lpNoTrail + "/")}"${stripPrefix
       ? `
     ${mwStripName}:
       stripPrefix:
         prefixes:
           - "${yamlEscape(lpNoTrail)}"`
       : ""
-  }
+    }
 `;
 
   const middlewares = stripPrefix
@@ -416,4 +420,47 @@ export async function generateReverseProxyConfsFromSpawnedStates(args: {
   if (!args.nginxConfHome && !args.traefikConfHome) {
     console.log(nginxBundledReverseProxyConf(states, overrides));
   }
+}
+
+export function nginxProxyManagerJSON(
+  states: SpawnedState[],
+  overrides: ProxyConfOverrides = {},
+): string {
+  const locations = states.map((s) => {
+    const id = stateId(s);
+    const kind = stateKind(s);
+    const dbPath = stateDbPath(s);
+    const upstream = upstreamFromState(s);
+    const upstreamUrl = new URL(upstream);
+    const locationPrefix = overrides.nginxProxyManager?.locationPrefix ??
+      defaultLocationPrefixFromState(s);
+    const rawLp = ensureTrailingSlash(locationPrefix).replaceAll(/\/+/g, "/");
+    const lp = (rawLp === "/") ? "/" : trimTrailingSlashes(rawLp);
+
+    const forwardScheme = overrides.nginxProxyManager?.upstreamScheme ?? "http";
+    const forwardHost = overrides.nginxProxyManager?.upstreamHost ?? "0.0.0.0";
+    const forwardPort = parseInt(upstreamUrl.port) ||
+      (upstreamUrl.protocol === "https:" ? 443 : 80);
+
+    const advConfig = [
+      ["Id", id],
+      ["Db", dbPath],
+      ["Kind", kind],
+      ["Pid", s.pid],
+      ["Upstream", `${forwardScheme}://${forwardHost}:${forwardPort}`],
+      ["ProxyPrefix", rawLp],
+    ].map(([name, value]) =>
+      `proxy_set_header X-Truth-Yard-${name} "${String(value)}";`
+    ).join("\n");
+
+    return {
+      path: lp,
+      forward_scheme: forwardScheme,
+      forward_host: forwardHost,
+      forward_port: forwardPort,
+      advanced_config: advConfig,
+    };
+  });
+
+  return JSON.stringify({ locations }, null, 2);
 }
