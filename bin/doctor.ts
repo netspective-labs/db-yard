@@ -1,209 +1,131 @@
 #!/usr/bin/env -S deno run --allow-all
 
-import * as colors from "@std/fmt/colors";
-import { build$, CommandBuilder } from "@david/dax";
+import { doctor } from "jsr:@spry/universal";
 
-const $ = build$({ commandBuilder: new CommandBuilder().noThrow() });
+const api = doctor([
+  "deno --version",
+  {
+    type: "group",
+    label: "Git dependencies",
+    items: [
+      {
+        type: "custom",
+        label: "Git hooks setup",
+        run: async (ctx) => {
+          const hooksResult = await ctx.spawnText("git config core.hooksPath");
+          const hooksPath = hooksResult.stdout.trim();
 
-export type ReportResult = {
-  readonly ok: string;
-} | {
-  readonly warn: string;
-} | {
-  readonly suggest: string;
-};
-
-export interface DoctorReporter {
-  (
-    args: ReportResult | {
-      test: () => ReportResult | Promise<ReportResult>;
-    },
-  ): Promise<void>;
-}
-
-export interface DoctorDiagnostic {
-  readonly diagnose: (report: DoctorReporter) => Promise<void>;
-}
-
-export interface DoctorCategory {
-  readonly label: string;
-  readonly diagnostics: () => Generator<DoctorDiagnostic, void>;
-}
-
-export function doctorCategory(
-  label: string,
-  diagnostics: () => Generator<DoctorDiagnostic, void>,
-): DoctorCategory {
-  return {
-    label,
-    diagnostics,
-  };
-}
-
-export function denoDoctor(): DoctorCategory {
-  return doctorCategory("Deno", function* () {
-    const deno: DoctorDiagnostic = {
-      diagnose: async (report: DoctorReporter) => {
-        report({ ok: (await $`deno --version`.lines())[0] });
-      },
-    };
-    yield deno;
-  });
-}
-
-/**
- * Doctor task legend:
- * - 🚫 is used to indicate a warning or error and should be corrected
- * - 💡 is used to indicate an (optional) _suggestion_
- * - 🆗 is used to indicate success
- * @param categories
- * @returns
- */
-export function doctor(categories: () => Generator<DoctorCategory>) {
-  // deno-lint-ignore require-await
-  const report = async (options: ReportResult) => {
-    if ("ok" in options) {
-      console.info("  🆗", colors.green(options.ok));
-    } else if ("suggest" in options) {
-      console.info("  💡", colors.yellow(options.suggest));
-    } else {
-      console.warn("  🚫", colors.brightRed(options.warn));
-    }
-  };
-
-  return async () => {
-    for (const cat of categories()) {
-      console.info(colors.dim(cat.label));
-      for (const diag of cat.diagnostics()) {
-        await diag.diagnose(async (options) => {
-          if ("test" in options) {
-            try {
-              report(await options.test());
-            } catch (err) {
-              report({ warn: err.toString() });
-            }
-          } else {
-            report(options);
+          if (hooksPath.length === 0) {
+            return { kind: "warn" as const, message: "Git hooks not setup, run `deno task init`" };
           }
-        });
-      }
-    }
-  };
-}
 
-export const checkup = doctor(function* () {
-  yield doctorCategory("Build dependencies", function* () {
-    yield* denoDoctor().diagnostics();
-  });
-
-  yield doctorCategory("Git dependencies", function* () {
-    yield {
-      diagnose: async (report) => {
-        const hooksPathLines = await $`git config core.hooksPath`.lines();
-        const hooksPath = hooksPathLines.length > 0 ? hooksPathLines[0] : "";
-
-        if (hooksPath.trim().length > 0) {
           try {
-            const hookFiles =
-              (await $`find ${hooksPath} -maxdepth 1 -type f`.noThrow().lines())
-                .filter((f) => f.trim().length > 0);
-            if (hookFiles.length > 0) {
-              for (const hook of hookFiles) {
+            const findResult = await ctx.spawnText(`find ${hooksPath} -maxdepth 1 -type f`);
+            const hookFiles = findResult.stdout.split('\n').filter(f => f.trim().length > 0);
+
+            if (hookFiles.length === 0) {
+              return { kind: "suggest" as const, message: `No hooks found in ${hooksPath}` };
+            }
+
+            const reports = [];
+            for (const hook of hookFiles) {
+              try {
                 const info = await Deno.stat(hook);
-                const isExecutable = info.mode
-                  ? (info.mode & 0o111) !== 0
-                  : false;
+                const isExecutable = info.mode ? (info.mode & 0o111) !== 0 : false;
                 if (isExecutable) {
-                  report({ ok: `Git hook executable: ${hook}` });
+                  reports.push({ kind: "ok" as const, message: `Git hook executable: ${hook}` });
                 } else {
-                  report({
-                    warn:
-                      `Git hook NOT executable: ${hook} (run \`chmod +x ${hook}\`)`,
+                  reports.push({
+                    kind: "warn" as const,
+                    message: `Git hook NOT executable: ${hook} (run \`chmod +x ${hook}\`)`
                   });
                 }
+              } catch {
+                reports.push({ kind: "warn" as const, message: `Could not check ${hook}` });
               }
-            } else {
-              report({ suggest: `No hooks found in ${hooksPath}` });
             }
+
+            // Return the first non-ok report, or the first ok report
+            return reports.find(r => r.kind !== "ok") || reports[0];
           } catch {
-            report({ warn: `Could not access hooks path: ${hooksPath}` });
+            return { kind: "warn" as const, message: `Could not access hooks path: ${hooksPath}` };
           }
-        } else {
-          report({
-            test: () => ({ warn: "Git hooks not setup, run `deno task init`" }),
-          });
-        }
+        },
       },
-    };
-  });
-
-  yield doctorCategory("Core dependencies", function* () {
-    yield {
-      diagnose: async (report) => {
-        await report({
-          test: async () => (await $.commandExists("sqlite3")
-            ? { ok: `sqlite3: ${(await $`sqlite3 --version`.lines())[0]}` }
-            : {
-              warn:
-                "sqlite3 not found in PATH, but it is required for truth-yard",
-            }),
-        });
-        await report({
-          test: async () => (await $.commandExists("sqlpage")
-            ? { ok: `sqlpage: ${(await $`sqlpage --version`.lines())[0]}` }
-            : { warn: "sqlpage not found in PATH, required for web-ui" }),
-        });
-        await report({
-          test: async () => (await $.commandExists("surveilr")
-            ? { ok: `surveilr: ${(await $`surveilr --version`.lines())[0]}` }
-            : { warn: "surveilr not found in PATH, required for ingestion" }),
-        });
+    ],
+  },
+  {
+    type: "group",
+    label: "Core dependencies",
+    items: [
+      { type: "version", cmd: "sqlite3 --version", label: "sqlite3" },
+      { type: "version", cmd: "sqlpage --version", label: "sqlpage" },
+      { type: "version", cmd: "surveilr --version", label: "surveilr" },
+    ],
+  },
+  {
+    type: "group",
+    label: "Optional runtime dependencies",
+    items: [
+      {
+        type: "exists",
+        cmd: "nginx",
+        onFound: async (_ctx) => [
+          { type: "version", cmd: "nginx -v", label: "nginx" },
+        ],
+        onMissing: () => ({
+          kind: "suggest" as const,
+          message: "nginx not found in PATH, install it if you want to use nginx as a reverse proxy"
+        }),
       },
-    };
-  });
-
-  yield doctorCategory("Optional runtime dependencies", function* () {
-    yield {
-      diagnose: async (report) => {
-        await report({
-          test: async () => (await $.commandExists("nginx")
-            ? {
-              ok: `nginx: ${
-                (await $`nginx -v`.noThrow().captureCombined()).combined.trim()
-              }`,
-            }
-            : {
-              suggest:
-                "nginx not found in PATH, install it if you want to use nginx as a reverse proxy",
-            }),
-        });
-        await report({
-          test: async () => (await $.commandExists("psql")
-            ? { ok: `psql: ${(await $`psql --version`.lines())[0]}` }
-            : { suggest: "PostgreSQL psql not found in PATH, optional" }),
-        });
+      {
+        type: "exists",
+        cmd: "psql",
+        onFound: async (_ctx) => [
+          { type: "version", cmd: "psql --version", label: "PostgreSQL" },
+        ],
+        onMissing: () => ({ kind: "suggest" as const, message: "PostgreSQL psql not found in PATH, optional" }),
       },
-    };
-  });
-
-  yield doctorCategory("Project structure", function* () {
-    yield {
-      diagnose: async (report) => {
-        const checkFile = async (path: string) => {
+    ],
+  },
+  {
+    type: "group",
+    label: "Project structure",
+    items: [
+      {
+        type: "custom",
+        label: "bin/yard.ts",
+        run: async () => {
           try {
-            await Deno.stat(path);
-            return { ok: `${path} exists` };
+            await Deno.stat("bin/yard.ts");
+            return { kind: "ok" as const, message: "bin/yard.ts exists" };
           } catch {
-            return { warn: `${path} is missing` };
+            return { kind: "warn" as const, message: "bin/yard.ts is missing" };
           }
-        };
-        await report({ test: () => checkFile("bin/yard.ts") });
-        await report({ test: () => checkFile("deno.jsonc") });
+        },
       },
-    };
-  });
-});
+      {
+        type: "custom",
+        label: "deno.jsonc",
+        run: async () => {
+          try {
+            await Deno.stat("deno.jsonc");
+            return { kind: "ok" as const, message: "deno.jsonc exists" };
+          } catch {
+            return { kind: "warn" as const, message: "deno.jsonc is missing" };
+          }
+        },
+      },
+    ],
+  },
+]);
 
 if (import.meta.main) {
-  await checkup();
+  const result = await api.run();
+  api.render.cli(result);
+
+  // Also demonstrate JSON output
+  if (Deno.args.includes("--json")) {
+    console.log(JSON.stringify(api.render.json(result), null, 2));
+  }
 }
