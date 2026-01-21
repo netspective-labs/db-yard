@@ -1,6 +1,6 @@
 #!/usr/bin/env -S deno run --allow-all
 
-import { doctor } from "jsr:@spry/universal";
+import { doctor } from "jsr:@spry/universal@1.7.5";
 
 const api = doctor([
   "deno --version",
@@ -16,39 +16,61 @@ const api = doctor([
           const hooksPath = hooksResult.stdout.trim();
 
           if (hooksPath.length === 0) {
-            return { kind: "warn" as const, message: "Git hooks not setup, run `deno task init`" };
+            return {
+              kind: "warn" as const,
+              message: "Git hooks not setup, run `deno task init`",
+            };
           }
 
           try {
-            const findResult = await ctx.spawnText(`find ${hooksPath} -maxdepth 1 -type f`);
-            const hookFiles = findResult.stdout.split('\n').filter(f => f.trim().length > 0);
+            const findResult = await ctx.spawnText(
+              `find ${hooksPath} -maxdepth 1 -type f`,
+            );
+            const hookFiles = findResult.stdout.split("\n").filter((f) =>
+              f.trim().length > 0
+            );
 
             if (hookFiles.length === 0) {
-              return { kind: "suggest" as const, message: `No hooks found in ${hooksPath}` };
+              return {
+                kind: "suggest" as const,
+                message: `No hooks found in ${hooksPath}`,
+              };
             }
 
             const reports = [];
             for (const hook of hookFiles) {
               try {
                 const info = await Deno.stat(hook);
-                const isExecutable = info.mode ? (info.mode & 0o111) !== 0 : false;
+                const isExecutable = info.mode
+                  ? (info.mode & 0o111) !== 0
+                  : false;
                 if (isExecutable) {
-                  reports.push({ kind: "ok" as const, message: `Git hook executable: ${hook}` });
+                  reports.push({
+                    kind: "ok" as const,
+                    message: `Git hook executable: ${hook}`,
+                  });
                 } else {
                   reports.push({
                     kind: "warn" as const,
-                    message: `Git hook NOT executable: ${hook} (run \`chmod +x ${hook}\`)`
+                    message:
+                      `Git hook NOT executable: ${hook} (run \`chmod +x ${hook}\`)`,
                   });
                 }
               } catch {
-                reports.push({ kind: "warn" as const, message: `Could not check ${hook}` });
+                reports.push({
+                  kind: "warn" as const,
+                  message: `Could not check ${hook}`,
+                });
               }
             }
 
             // Return the first non-ok report, or the first ok report
-            return reports.find(r => r.kind !== "ok") || reports[0];
+            return reports.find((r) => r.kind !== "ok") || reports[0];
           } catch {
-            return { kind: "warn" as const, message: `Could not access hooks path: ${hooksPath}` };
+            return {
+              kind: "warn" as const,
+              message: `Could not access hooks path: ${hooksPath}`,
+            };
           }
         },
       },
@@ -70,21 +92,27 @@ const api = doctor([
       {
         type: "exists",
         cmd: "nginx",
-        onFound: async (_ctx) => [
-          { type: "version", cmd: "nginx -v", label: "nginx" },
-        ],
+        onFound: async (_ctx) =>
+          await Promise.resolve([
+            { type: "version", cmd: "nginx -v", label: "nginx" },
+          ]),
         onMissing: () => ({
           kind: "suggest" as const,
-          message: "nginx not found in PATH, install it if you want to use nginx as a reverse proxy"
+          message:
+            "nginx not found in PATH, install it if you want to use nginx as a reverse proxy",
         }),
       },
       {
         type: "exists",
         cmd: "psql",
-        onFound: async (_ctx) => [
-          { type: "version", cmd: "psql --version", label: "PostgreSQL" },
-        ],
-        onMissing: () => ({ kind: "suggest" as const, message: "PostgreSQL psql not found in PATH, optional" }),
+        onFound: async (_ctx) =>
+          await Promise.resolve([
+            { type: "version", cmd: "psql --version", label: "PostgreSQL" },
+          ]),
+        onMissing: () => ({
+          kind: "suggest" as const,
+          message: "PostgreSQL psql not found in PATH, optional",
+        }),
       },
     ],
   },
