@@ -1,6 +1,6 @@
 // lib/materialize.ts
 import { ensureDir } from "@std/fs";
-import { basename, join, resolve } from "@std/path";
+import { basename, dirname, join, resolve } from "@std/path";
 
 import type { Path } from "./discover.ts";
 import { encounters, fileSystemSource } from "./discover.ts";
@@ -212,7 +212,7 @@ async function materializeOnce(
       rootsAbs: args.rootsAbs,
     });
 
-  const expose = (entry: ExposableService, _candidate: string) => {
+  const expose = async (entry: ExposableService, _candidate: string) => {
     // Smart spawn gating (Linux-only taggedProcesses). If not Linux, runningProvenance is empty.
     if (smartSpawn) {
       let provKey: string;
@@ -230,7 +230,17 @@ async function materializeOnce(
     const fileAbs = Deno.realPathSync(resolve(entry.supplier.location));
     const relFromRoot = relFromRoots(fileAbs, args.rootsAbs);
     const proxyEndpointPrefix = proxyPrefixFromRel(relFromRoot);
-    return { proxyEndpointPrefix, exposableServiceConf: {} } as const;
+
+    const exposableServiceConf: Record<string, unknown> = {};
+    const dotEnvPath = join(dirname(fileAbs), ".env");
+    try {
+      const dotEnv = await Deno.readTextFile(dotEnvPath);
+      exposableServiceConf[".env"] = dotEnv;
+    } catch {
+      // ignore if .env missing or unreadable
+    }
+
+    return { proxyEndpointPrefix, exposableServiceConf } as const;
   };
 
   const gen = spawn(src, expose, spawnedLedgerPath, {
